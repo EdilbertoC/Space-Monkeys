@@ -116,6 +116,7 @@ app/
   fusion/fuse.py     multi-sensor fusion
 pipeline/            historical batch pipeline (needs the [science] extra)
   ingest.py          FIRMS archive zips -> Parquet detections table
+  cube.py            detections -> fire-day cube (0.1° cell x UTC day x satellite)
 tests/
 ```
 
@@ -134,6 +135,16 @@ python -m pipeline.ingest pantanal
 - keeps confidence classes nominal and high for both sensors (MODIS 30–100, VIIRS `n`/`h`); `--min-confidence-class l` keeps everything;
 - drops static land sources using one mask for every sensor: points within ~1 km of a location VIIRS labels as volcano or static source (FIRMS `type` 1 or 2). MODIS type 2 labels are not used for the mask because in the Pantanal they are scattered and peak in the fire season, like vegetation fires;
 - keeps FIRMS `type` 3 ("offshore"): in the Pantanal these are fires over the seasonal wetland water mask.
+
+```bash
+python -m pipeline.cube pantanal
+```
+
+`cube` writes `data/processed/<region>/cube/year=YYYY/*.parquet` and `cube_report.json`. One row per 0.1° cell, UTC day and satellite (Terra, Aqua, SNPP, N20, N21) with at least one detection, so every row is a fire-day. Columns: `cell_id`, cell centre, `date`, `sensor`, `satellite`, `fire_day`, `n_pixels`, `n_overpasses`, `n_day`, `n_night`, `n_high`, `n_type2`, `frp_sum_mw`, `frp_max_mw`, `scan_mean_km`, `nrt`. Sensors are combined with OR on the cell-day, never summed. The report lists fire cell-days per year for MODIS, VIIRS, both and either, and P(MODIS | VIIRS).
+
+The cube keeps each VIIRS satellite apart on purpose: in the Pantanal, P(MODIS | any VIIRS) drops from about 0.37 to 0.26 when NOAA-20 joins in 2018, while P(MODIS | S-NPP) shows no break. The drop comes from the growing VIIRS constellation, not from MODIS.
+
+The cube is not yet clipped to land or to a country: the region box also covers sea and neighbouring countries.
 
 `data/` is not committed.
 

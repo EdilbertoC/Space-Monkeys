@@ -2,8 +2,6 @@
 """Ingestion tests. Every row below is copied verbatim from the FIRMS archive
 download for the Pantanal box (requests 848583 and 848586); nothing is made up."""
 
-import zipfile
-
 import pandas as pd
 import pytest
 
@@ -11,12 +9,7 @@ pytest.importorskip("duckdb")
 
 from app.realtime import detections  # noqa: E402
 from pipeline import ingest  # noqa: E402
-
-ARCHIVE_HEADER = (
-    "latitude,longitude,brightness,scan,track,acq_date,acq_time,satellite,instrument,"
-    "confidence,version,bright_t31,frp,daynight,type"
-)
-NRT_HEADER = ARCHIVE_HEADER.rsplit(",", 1)[0]
+from tests.firms_samples import ARCHIVE_HEADER, NRT_HEADER, csv_text, write_zip  # noqa: E402
 
 MODIS_ARCHIVE = [
     "-21.0319,-55.577,304.4,1,1,2000-11-01,0234,Terra,MODIS,60,6.03,293.7,5.1,N,0",
@@ -37,28 +30,22 @@ SNPP_NRT = [
 ]
 
 
-def _write_zip(path, members: dict[str, str]) -> None:
-    with zipfile.ZipFile(path, "w") as zf:
-        for name, text in members.items():
-            zf.writestr(name, text)
-
-
 @pytest.fixture
 def data_dir(tmp_path):
     raw = tmp_path / "raw" / "firms" / "test"
     raw.mkdir(parents=True)
-    _write_zip(
+    write_zip(
         raw / "DL_FIRE_M-C61_848583.zip",
         {
-            "fire_archive_M-C61_848583.csv": "\n".join([ARCHIVE_HEADER, *MODIS_ARCHIVE]) + "\n",
+            "fire_archive_M-C61_848583.csv": csv_text(ARCHIVE_HEADER, MODIS_ARCHIVE),
             "Readme.txt": "not a csv",
         },
     )
-    _write_zip(
+    write_zip(
         raw / "DL_FIRE_SV-C2_848586.zip",
         {
-            "fire_archive_SV-C2_848586.csv": "\n".join([ARCHIVE_HEADER, *SNPP_ARCHIVE]) + "\n",
-            "fire_nrt_SV-C2_848586.csv": "\n".join([NRT_HEADER, *SNPP_NRT]) + "\n",
+            "fire_archive_SV-C2_848586.csv": csv_text(ARCHIVE_HEADER, SNPP_ARCHIVE),
+            "fire_nrt_SV-C2_848586.csv": csv_text(NRT_HEADER, SNPP_NRT),
             "../outside.csv": ARCHIVE_HEADER + "\n",
         },
     )
