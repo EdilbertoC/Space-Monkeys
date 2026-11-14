@@ -89,9 +89,14 @@ def _ratio_key(df: pd.DataFrame) -> pd.Series:
     return df["month"].astype(str) + "|" + (df["v_pixels"] > 0).astype(int).astype(str)
 
 
-def fit_ratio(train: pd.DataFrame) -> dict:
-    table = train.groupby(_ratio_key(train))[TARGET].mean().to_dict()
-    return {"by_month_and_own": table, "overall": float(train[TARGET].mean())}
+def fit_ratio(train: pd.DataFrame, weight: str | None = None) -> dict:
+    """Weighted share of MODIS fire per (month, own detection); weight = row weights."""
+    w = train[weight] if weight else pd.Series(1.0, index=train.index)
+    key = _ratio_key(train)
+    num = (train[TARGET] * w).groupby(key).sum()
+    den = w.groupby(key).sum()
+    table = (num / den).to_dict()
+    return {"by_month_and_own": table, "overall": float((train[TARGET] * w).sum() / w.sum())}
 
 
 def ratio_predict(df: pd.DataFrame, model: dict) -> np.ndarray:
@@ -99,10 +104,12 @@ def ratio_predict(df: pd.DataFrame, model: dict) -> np.ndarray:
     return _ratio_key(df).map(table).fillna(model["overall"]).to_numpy(dtype=float)
 
 
-def positive_weight(y: pd.Series | np.ndarray) -> float:
+def positive_weight(y: pd.Series | np.ndarray, w: np.ndarray | None = None) -> float:
+    """Weighted negatives over weighted positives (row weights w default to 1)."""
     y = np.asarray(y)
-    pos = y.sum()
-    return float((len(y) - pos) / pos) if pos else 1.0
+    w = np.ones(len(y)) if w is None else np.asarray(w, dtype=float)
+    pos = float(w[y == 1].sum())
+    return float(w[y == 0].sum() / pos) if pos else 1.0
 
 
 def unweight(p: np.ndarray, w: float) -> np.ndarray:
@@ -111,21 +118,30 @@ def unweight(p: np.ndarray, w: float) -> np.ndarray:
     return p / (p + (1.0 - p) * w)
 
 
-def fit_lightgbm(train: pd.DataFrame, valid_year: int) -> tuple[lgb.Booster, dict]:
-    w = positive_weight(train[TARGET])
+def fit_lightgbm(
+    train: pd.DataFrame, valid_year: int, weight: str | None = None
+) -> tuple[lgb.Booster, dict]:
+    """Fit with the positive class weighted; `weight` names a row-weight column
+    (e.g. for down-sampled rows), used in the class weight and in training."""
+    rw = train[weight].to_numpy() if weight else None
+    w = positive_weight(train[TARGET], rw)
     params = {**LGB_PARAMS, "scale_pos_weight": w}
+
+    def ds(part: pd.DataFrame) -> lgb.Dataset:
+        return lgb.Dataset(part[FEATURES], part[TARGET], weight=part[weight] if weight else None)
+
     fit_part, valid = train[train["year"] < valid_year], train[train["year"] == valid_year]
     best_rounds = MAX_ROUNDS
     if len(fit_part) and len(valid) and valid[TARGET].nunique() == 2:
         booster = lgb.train(
             params,
-            lgb.Dataset(fit_part[FEATURES], fit_part[TARGET]),
+            ds(fit_part),
             num_boost_round=MAX_ROUNDS,
-            valid_sets=[lgb.Dataset(valid[FEATURES], valid[TARGET])],
+            valid_sets=[ds(valid)],
             callbacks=[lgb.early_stopping(EARLY_STOP, verbose=False)],
         )
         best_rounds = booster.best_iteration or MAX_ROUNDS
-    final = lgb.train(params, lgb.Dataset(train[FEATURES], train[TARGET]), best_rounds)
+    final = lgb.train(params, ds(train), best_rounds)
     return final, {"positive_weight": w, "rounds": best_rounds, "valid_year": valid_year}
 
 
@@ -140,7 +156,18 @@ def wape(pred: pd.Series, actual: pd.Series) -> float | None:
 
 
 def evaluate(df: pd.DataFrame, p: np.ndarray) -> dict:
-    y = df[TARGET].to_numpy()
+    return evaluate_arrays(
+        df[TARGET].to_numpy(),
+        np.asarray(p),
+        df["cell_id"].to_numpy(),
+        df["year"].to_numpy(),
+        df["date"].dt.month.to_numpy(),
+    )
+
+
+def evaluate_arrays(
+    y: np.ndarray, p: np.ndarray, cell_id: np.ndarray, year: np.ndarray, month: np.ndarray
+) -> dict:
     pc = np.clip(p, 1e-4, 1 - 1e-4)
     rows = {
         "log_loss": float(log_loss(y, pc, labels=[0, 1])),
@@ -148,15 +175,7 @@ def evaluate(df: pd.DataFrame, p: np.ndarray) -> dict:
         "roc_auc": float(roc_auc_score(y, p)) if len(set(y)) == 2 else None,
         "average_precision": float(average_precision_score(y, p)) if y.sum() else None,
     }
-    frame = pd.DataFrame(
-        {
-            "cell_id": df["cell_id"].to_numpy(),
-            "year": df["year"].to_numpy(),
-            "month": df["date"].dt.month.to_numpy(),
-            "y": y,
-            "p": p,
-        }
-    )
+    frame = pd.DataFrame({"cell_id": cell_id, "year": year, "month": month, "y": y, "p": p})
     monthly = frame.groupby(["year", "month"])[["y", "p"]].sum()
     cell_month = frame.groupby(["cell_id", "year", "month"])[["y", "p"]].sum()
     yearly = frame.groupby("year")[["y", "p"]].sum()

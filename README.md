@@ -48,6 +48,10 @@ docker run -p 8000:8000 --env-file .env space-monkeys-back
 
 ## API
 
+**Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers: the real-time routes below (exist) and the `/history` routes of the burning activity calendar (planned: calendar, climatology, anomaly, season, trend, map, and areas drawn in the app). Every example in it is a real value from the FIRMS archive (Pantanal biome). Harmonized fields stay `null` until the harmonized record exists. `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract. Open it in any OpenAPI viewer to browse it.
+
+Routes that run today:
+
 | Method | Path | Returns |
 | --- | --- | --- |
 | GET | `/health` | `{"status": "ok"}` |
@@ -120,6 +124,9 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   viewer.py          cube -> self-contained HTML viewer (dev tool), template in viewer_template.html
   training.py        cube -> training table for the VIIRS -> MODIS calibration, one per VIIRS satellite
   baselines.py       naive, ratio and LightGBM calibration, evaluated on the held-out years
+  biomes.py          label each 0.1° cell with its IBGE biome (also clips the national cube to Brazil)
+  crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
+docs/api/openapi.yaml  API contract with the frontend
 tests/
 ```
 
@@ -193,7 +200,36 @@ The calendar shows totals, so the main metrics are on totals: bias of the summed
 | | ratio | −7.7% | 22.6% | 72.6% | 0.910 | 0.457 |
 | | **LightGBM** | **−2.8%** | **4.8%** | **45.5%** | **0.955** | **0.750** |
 
-Yearly LightGBM totals stay within about ±5% of MODIS in every test year, including 2025–2026, so no strong MODIS drift shows up yet. Most of the LightGBM gain comes from the fire radiative power seen by VIIRS (`v_frp_sum`, ~70% of the gain): MODIS misses weak fires, and FRP measures how strong a fire is. Next: the U-Net (step 7) must beat these numbers on the same test years to be used.
+Yearly LightGBM totals stay within about ±5% of MODIS in every test year, including 2025–2026, so no strong MODIS drift shows up yet.
+
+**Outside the Pantanal (national cube, S-NPP, test years 2018–2026, Brazil cells only):**
+
+```bash
+python -m pipeline.biomes brazil                      # needs data/raw/ibge/Biomas_250mil.zip
+python -m pipeline.training brazil --satellite SNPP   # ~10 min, 69M rows
+python -m pipeline.crossbiome brazil                  # ~17 min
+```
+
+The national training table is too big for memory, so `crossbiome` trains on every row where S-NPP saw fire plus a fixed 1-in-5 sample of the neighbour-only rows (chosen by a hash of cell and date, weighted 5). Test years use every row. Bias and monthly WAPE of the summed probabilities against MODIS fire-days:
+
+| Biome (coverage) | Naive | LightGBM trained on Brazil | LightGBM trained on the Pantanal box |
+|---|---|---|---|
+| Brazil (82%) | +180% / 180% | −7.7% / 8.9% | −28.9% / 29.0% |
+| Amazon (85%) | +166% / 166% | −7.1% / 9.4% | −27.4% / 27.6% |
+| Cerrado (81%) | +157% / 157% | −5.5% / 7.9% | −28.2% / 28.3% |
+| Atlantic Forest (73%) | +293% / 293% | −8.6% / 10.2% | −40.3% / 40.3% |
+| Caatinga (79%) | +246% / 246% | −18.9% / 20.0% | −36.6% / 37.1% |
+| Pampa (70%) | +352% / 352% | −19.7% / 23.6% | −51.9% / 52.2% |
+| Pantanal (91%) | +85% / 85% | +0.9% / 7.8% | +2.9% / 7.2% |
+
+What this shows:
+
+- **No harmonization is much worse nationally** (+180%) than in the Pantanal (+85%): elsewhere fires are smaller, so VIIRS sees many more that MODIS misses.
+- **A model does not transfer across biomes.** The Pantanal model still ranks cell-days well (ROC AUC 0.85–0.90) but under-predicts every other biome by 27–52%: the same VIIRS signal means a higher chance of a MODIS detection in the Pantanal, where fires are bigger. The harmonization must be trained on the whole country.
+- **The national model under-predicts by 5–20%, and it does so on its training years too** (−5.2% overall, −12.5% on neighbour-only rows), so this is a calibration flaw of the weighted model, not a change in MODIS: for a fixed S-NPP signal (2–3 pixels), P(MODIS) is 0.22–0.26 in every year 2012–2024. Next: calibrate the probabilities on a held-out year.
+- **Possible MODIS drift at the end:** that same P(MODIS) falls to 0.22 in 2025 and 0.18 in 2026 (partial year). To be checked as the record grows.
+- **Coverage is lowest where fires are small** (Pampa 70%, Atlantic Forest 73%): the gap correction in step 8 matters most there.
+- Cell-month error stays high (61–113%): numbers for small areas need visible uncertainty. Most of the LightGBM gain comes from the fire radiative power seen by VIIRS (`v_frp_sum`, ~70% of the gain): MODIS misses weak fires, and FRP measures how strong a fire is. Next: the U-Net (step 7) must beat these numbers on the same test years to be used.
 
 `data/` is not committed.
 
@@ -219,6 +255,10 @@ Historical record (pipeline), from the FIRMS archive download (https://firms.mod
 - Attribute fields (including `type`: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore): https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs
 - Pilot area: box west −60, south −22.5, east −54.5, north −15 (Pantanal), 2000-11-01 to 2026-11-14.
 - National area: box west −74.5, south −34.5, east −28.5, north 6 (Brazil and surroundings), same dates (requests 848644–848647).
+
+### IBGE biomes
+
+- **Biomas do Brasil 2019, 1:250,000** (`Biomas_250mil.zip`, 15.0 MB), Instituto Brasileiro de Geografia e Estatística (IBGE): https://geoftp.ibge.gov.br/informacoes_ambientais/estudos_ambientais/biomas/vetores/ . Used to label every 0.1° cell with its biome (cell centre inside the biome) and to keep only Brazil cells in the national evaluation. Coordinates in SIRGAS 2000, used as WGS84 (difference about a metre).
 
 ### Basemap (cube viewer only)
 
@@ -256,6 +296,10 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | DuckDB, LightGBM (pipeline, optional `[science]` extra) | MIT |
 | PyArrow (pipeline) | Apache-2.0 |
 | scikit-learn (pipeline metrics) | BSD-3-Clause |
+| Shapely (biome labels) | BSD-3-Clause |
+| pyshp (reads the IBGE shapefile) | MIT |
+| openapi-spec-validator (contract tests) | Apache-2.0 |
+| jsonschema (contract tests) | MIT |
 | PyTorch (pipeline) | BSD-3-Clause |
 | Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |

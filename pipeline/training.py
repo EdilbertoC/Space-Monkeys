@@ -87,7 +87,7 @@ FEATURES = [
     "cell_lon",
 ]
 TARGET = "modis"
-KEYS = ["cell_id", "date", "year", "split"]
+KEYS = ["cell_id", "date", "year", "split", "biome"]
 DIAGNOSTICS = ["modis_pixels", "terra", "aqua"]  # never use as features
 
 
@@ -168,6 +168,14 @@ def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: st
         GROUP BY cell_id, date
     """)
 
+    # Biome per cell (pipeline.biomes), a label for evaluation, never a feature.
+    biome_file = data_dir / "processed" / region / "cell_biome.parquet"
+    biome_source = (
+        f"(SELECT cell_id, biome FROM read_parquet('{biome_file.as_posix()}'))"
+        if biome_file.exists()
+        else "(SELECT CAST(NULL AS BIGINT) AS cell_id, CAST(NULL AS VARCHAR) AS biome)"
+    )
+
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
@@ -195,10 +203,12 @@ def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: st
                 CAST(m.cell_id IS NOT NULL AS TINYINT) AS modis,
                 coalesce(m.modis_pixels, 0) AS modis_pixels,
                 coalesce(m.terra, false) AS terra,
-                coalesce(m.aqua, false) AS aqua
+                coalesce(m.aqua, false) AS aqua,
+                b.biome
             FROM ctx c
             LEFT JOIN v USING (cell_id, date)
             LEFT JOIN m USING (cell_id, date)
+            LEFT JOIN {biome_source} b USING (cell_id)
             WHERE c.candidate AND c.date >= DATE '{first}'
             ORDER BY c.date, c.cell_id
         ) TO '{out_dir.as_posix()}' (FORMAT parquet, PARTITION_BY (year), COMPRESSION zstd)
