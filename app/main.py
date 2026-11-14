@@ -5,8 +5,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import live, system
+from app.api import history, live, system
 from app.config import get_settings
+from app.history.store import HistoryStore
 from app.realtime.live import LiveState
 from app.realtime.pulse import PulseBroker
 from app.realtime.worker import RealtimeWorker
@@ -23,6 +24,13 @@ async def lifespan(app: FastAPI):
         fusion_window_hours=settings.fusion_window_hours,
     )
     app.state.broker = PulseBroker()
+    app.state.history = None
+    if (settings.history_data_dir / "meta.json").exists():
+        app.state.history = HistoryStore(settings.history_data_dir)
+    else:
+        logging.getLogger(__name__).warning(
+            "No historical data in %s: /history answers 503", settings.history_data_dir
+        )
     app.state.worker = None
     if settings.enable_worker:
         app.state.worker = RealtimeWorker(settings, app.state.live, app.state.broker)
@@ -46,11 +54,12 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
     app.include_router(system.router)
     app.include_router(live.router)
+    app.include_router(history.router)
     return app
 
 

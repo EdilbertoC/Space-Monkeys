@@ -2,13 +2,13 @@
 openapi: 3.1.0
 info:
   title: Space Monkeys API
-  version: 0.3.0-draft
+  version: 0.4.0
   summary: Burning activity calendar from harmonized MODIS and VIIRS fire hotspots, plus a real-time fire pulse.
   description: |
     Contract between the Space Monkeys backend and frontend. It lists everything the
     backend offers. Routes tagged `history` are the burning activity calendar
-    (planned, step 10 of the plan). Routes tagged `live` and `system` exist today
-    and are frozen.
+    (served from the table built by `python -m pipeline.serving`; 503 when it is
+    missing). Routes tagged `live` and `system` are the frozen real-time side.
 
     ## Units and conventions
 
@@ -54,8 +54,8 @@ info:
 
     ## Harmonization status
 
-    Until the harmonized record is built (step 8), `harmonized` fields are `null`
-    and `GET /history/meta` reports `harmonization.status: pending`.
+    `GET /history/meta` reports `harmonization.status`. While it is `pending`,
+    `harmonized` fields are `null` and `series=harmonized` answers 409.
 
     While MODIS still delivers data, the harmonized series equals MODIS. The VIIRS
     estimate is computed for every day since 2012 anyway (each year predicted by a
@@ -105,7 +105,7 @@ paths:
               schema: { $ref: "#/components/schemas/Meta" }
               examples:
                 current:
-                  summary: State of the record on 2026-11-14 (harmonization pending)
+                  summary: State of the record on 2026-11-14
                   value:
                     unit: fire_cell_days
                     grid_degrees: 0.1
@@ -127,14 +127,17 @@ paths:
                       - { name: Pampa, cells: 1825 }
                       - { name: Pantanal, cells: 1301 }
                     harmonization:
-                      status: pending
-                      method: "MODIS observed while MODIS delivers data; afterwards MODIS-equivalent expected fire cell-days estimated from VIIRS (calibrated per biome, coverage gap added back)."
+                      status: available
+                      method: "MODIS observed while MODIS delivers data; afterwards MODIS-equivalent expected fire cell-days estimated from VIIRS (LightGBM cross-fitted by year blocks, calibrated per biome, coverage gap added back)."
                       switch_date: null
                       viirs_satellites:
-                        - { name: SNPP, start: "2012-01-20", end: "2026-11-02" }
-                        - { name: N20, start: "2026-11-03", end: null }
-                      model: null
-                      version: null
+                        - { name: SNPP, start: "2012-01-20", end: "2026-07-31" }
+                      estimate_until: "2026-07-31"
+                      model: lightgbm-crossfit-isotonic-per-biome
+                      version: "2026-11-14"
+                      test_metrics:
+                        Brazil: { monthly_wape: 0.0689, bias: -0.0002 }
+                        Pantanal: { monthly_wape: 0.1132, bias: 0.0002 }
                     known_gaps:
                       - { sensor: MODIS, period: "2001-06/2001-07", note: "Missing data, end of June to beginning of July 2001 (FIRMS download Readme)." }
                       - { sensor: MODIS, period: "2002", note: "Some data missing throughout the year (FIRMS download Readme)." }
@@ -144,6 +147,8 @@ paths:
                       max_area_cells: 50000
                       max_map_cells: 20000
                       max_day_buckets: 1000
+
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/areas:
     post:
@@ -167,6 +172,7 @@ paths:
               schema: { $ref: "#/components/schemas/Area" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/calendar:
     get:
@@ -190,26 +196,27 @@ paths:
               schema: { $ref: "#/components/schemas/Calendar" }
               examples:
                 pantanal_2020_peak:
-                  summary: Pantanal biome, Aug–Oct 2020, by month (harmonization pending)
+                  summary: Pantanal biome, Aug–Oct 2020, by month (harmonized = MODIS while MODIS has data)
                   value:
                     area: { kind: biome, biome: Pantanal, cells: 1301 }
                     unit: fire_cell_days
                     granularity: month
                     buckets:
-                      - { start: "2020-08-01", end: "2020-08-31", harmonized: null, harmonized_source: null, modis: 2053, viirs: 3637, provisional: false }
-                      - { start: "2020-09-01", end: "2020-09-30", harmonized: null, harmonized_source: null, modis: 2529, viirs: 4662, provisional: false }
-                      - { start: "2020-10-01", end: "2020-10-31", harmonized: null, harmonized_source: null, modis: 1435, viirs: 3075, provisional: false }
+                      - { start: "2020-08-01", end: "2020-08-31", harmonized: { value: 2053.0, low: 2053.0, high: 2053.0 }, harmonized_source: modis, modis: 2053, viirs: 3637, provisional: false }
+                      - { start: "2020-09-01", end: "2020-09-30", harmonized: { value: 2529.0, low: 2529.0, high: 2529.0 }, harmonized_source: modis, modis: 2529, viirs: 4662, provisional: false }
+                      - { start: "2020-10-01", end: "2020-10-31", harmonized: { value: 1435.0, low: 1435.0, high: 1435.0 }, harmonized_source: modis, modis: 1435, viirs: 3075, provisional: false }
         "400": { $ref: "#/components/responses/BadArea" }
         "404": { $ref: "#/components/responses/UnknownArea" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/climatology:
     get:
       tags: [history]
       operationId: getClimatology
       summary: The normal year for an area (median and 10th–90th percentile band)
-      description: For each week (or month) of the year, the distribution of fire cell-days over the base years. This is the "normal" the calendar is compared to.
+      description: For each week (or month) of the year, the distribution of fire cell-days over the complete base years. This is the "normal" the calendar is compared to. Week labels use a non-leap year.
       parameters:
         - $ref: "#/components/parameters/bbox"
         - $ref: "#/components/parameters/biome"
@@ -236,14 +243,15 @@ paths:
                     granularity: week
                     base_years: [2003, 2025]
                     buckets:
-                      - { index: 34, label: "Aug 26–Sep 1", median: 143.0, p10: 41.2, p90: 260.4, mean: 173.3 }
-                      - { index: 35, label: "Sep 2–8", median: 225.0, p10: 36.0, p90: 630.4, mean: 259.9 }
-                      - { index: 36, label: "Sep 9–15", median: 178.0, p10: 42.4, p90: 483.2, mean: 236.0 }
+                      - { index: 34, label: "Aug 27–Sep 2", median: 143.0, p10: 41.2, p90: 260.4, mean: 173.3 }
+                      - { index: 35, label: "Sep 3–9", median: 225.0, p10: 36.0, p90: 630.4, mean: 259.9 }
+                      - { index: 36, label: "Sep 10–16", median: 178.0, p10: 42.4, p90: 483.2, mean: 236.0 }
         "400": { $ref: "#/components/responses/BadArea" }
         "409": { $ref: "#/components/responses/HarmonizationPending" }
         "404": { $ref: "#/components/responses/UnknownArea" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/anomaly:
     get:
@@ -278,18 +286,20 @@ paths:
                     unit: fire_cell_days
                     series: modis
                     period: { start: "2020-09-02", end: "2020-09-08" }
-                    value: 661
-                    normal: { median: 217.5, p10: 33.5, p90: 504.5 }
-                    percentile: 90.9
-                    ratio_to_median: 3.04
+                    value: 661.0
+                    normal: { median: 200.5, p10: 33.3, p90: 472.4 }
+                    percentile: 95.5
+                    ratio_to_median: 3.3
                     class: above
                     base_years: [2003, 2025]
                     excluded_years: [2020]
+                    value_interval: null
         "400": { $ref: "#/components/responses/BadArea" }
         "409": { $ref: "#/components/responses/HarmonizationPending" }
         "404": { $ref: "#/components/responses/UnknownArea" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/season:
     get:
@@ -325,7 +335,7 @@ paths:
                     area: { kind: biome, biome: Pantanal, cells: 1301 }
                     series: modis
                     year: 2020
-                    total: 9717
+                    total: 9717.0
                     start_week: "2020-04-01"
                     peak_week: "2020-09-09"
                     end_week: "2020-10-21"
@@ -338,6 +348,7 @@ paths:
         "404": { $ref: "#/components/responses/UnknownArea" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/trend:
     get:
@@ -374,29 +385,29 @@ paths:
                     unit: fire_cell_days
                     series: modis
                     annual:
-                      - { year: 2003, value: 3070, complete: true }
-                      - { year: 2004, value: 5438, complete: true }
-                      - { year: 2005, value: 7161, complete: true }
-                      - { year: 2006, value: 2681, complete: true }
-                      - { year: 2007, value: 5244, complete: true }
-                      - { year: 2008, value: 3336, complete: true }
-                      - { year: 2009, value: 3778, complete: true }
-                      - { year: 2010, value: 4748, complete: true }
-                      - { year: 2011, value: 2741, complete: true }
-                      - { year: 2012, value: 3823, complete: true }
-                      - { year: 2013, value: 2720, complete: true }
-                      - { year: 2014, value: 1352, complete: true }
-                      - { year: 2015, value: 3191, complete: true }
-                      - { year: 2016, value: 4019, complete: true }
-                      - { year: 2017, value: 3612, complete: true }
-                      - { year: 2018, value: 1479, complete: true }
-                      - { year: 2019, value: 5728, complete: true }
-                      - { year: 2020, value: 9717, complete: true }
-                      - { year: 2021, value: 3682, complete: true }
-                      - { year: 2022, value: 1261, complete: true }
-                      - { year: 2023, value: 2650, complete: true }
-                      - { year: 2024, value: 5034, complete: true }
-                      - { year: 2025, value: 476, complete: true }
+                      - { year: 2003, value: 3070.0, complete: true }
+                      - { year: 2004, value: 5438.0, complete: true }
+                      - { year: 2005, value: 7161.0, complete: true }
+                      - { year: 2006, value: 2681.0, complete: true }
+                      - { year: 2007, value: 5244.0, complete: true }
+                      - { year: 2008, value: 3336.0, complete: true }
+                      - { year: 2009, value: 3778.0, complete: true }
+                      - { year: 2010, value: 4748.0, complete: true }
+                      - { year: 2011, value: 2741.0, complete: true }
+                      - { year: 2012, value: 3823.0, complete: true }
+                      - { year: 2013, value: 2720.0, complete: true }
+                      - { year: 2014, value: 1352.0, complete: true }
+                      - { year: 2015, value: 3191.0, complete: true }
+                      - { year: 2016, value: 4019.0, complete: true }
+                      - { year: 2017, value: 3612.0, complete: true }
+                      - { year: 2018, value: 1479.0, complete: true }
+                      - { year: 2019, value: 5728.0, complete: true }
+                      - { year: 2020, value: 9717.0, complete: true }
+                      - { year: 2021, value: 3682.0, complete: true }
+                      - { year: 2022, value: 1261.0, complete: true }
+                      - { year: 2023, value: 2650.0, complete: true }
+                      - { year: 2024, value: 5034.0, complete: true }
+                      - { year: 2025, value: 476.0, complete: true }
                     slope_per_year: -95.2
                     ci95: [-193.6, 49.0]
                     significant: false
@@ -406,6 +417,7 @@ paths:
         "404": { $ref: "#/components/responses/UnknownArea" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /history/map:
     get:
@@ -434,12 +446,13 @@ paths:
                     grid_degrees: 0.1
                     period: { start: "2020-09-01", end: "2020-09-30" }
                     cells:
-                      - { cell_id: 2607629, lat: -17.55, lon: -57.05, harmonized: null, modis: 25, viirs: 29 }
-                      - { cell_id: 2618425, lat: -17.25, lon: -57.45, harmonized: null, modis: 15, viirs: 29 }
+                      - { cell_id: 2607629, lat: -17.55, lon: -57.05, harmonized: 25.0, modis: 25, viirs: 29 }
+                      - { cell_id: 2618425, lat: -17.25, lon: -57.45, harmonized: 15.0, modis: 15, viirs: 29 }
         "400": { $ref: "#/components/responses/BadArea" }
         "404": { $ref: "#/components/responses/UnknownArea" }
         "413": { $ref: "#/components/responses/AreaTooLarge" }
         "422": { $ref: "#/components/responses/Invalid" }
+        "503": { $ref: "#/components/responses/HistoryUnavailable" }
 
   /fires/live:
     get:
@@ -589,6 +602,11 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
           example: { detail: "harmonized series not available yet; use series=modis" }
+    HistoryUnavailable:
+      description: The historical table is not built on this server (`python -m pipeline.serving`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     UnknownArea:
       description: area_id was not created by POST /history/areas (or has expired).
       content:

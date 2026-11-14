@@ -21,6 +21,7 @@ dependencies = [
     "xarray>=2024.6",
     "h5netcdf>=1.3",
     "h5py>=3.11",
+    "duckdb>=1.1",
 ]
 
 [project.optional-dependencies]
@@ -56,4 +57,4 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 "tests/*" = ["E501"]
 
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Body"]

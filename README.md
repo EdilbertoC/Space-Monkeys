@@ -14,8 +14,7 @@ This repository holds the API, the real-time worker and the multi-sensor fusion.
 | Multi-sensor fusion | Merges detections of the same fire from different sensors into one event with a better position, an uncertainty radius and a combined confidence |
 | Pulse stream | Pushes new, updated and expired fires to the frontend over Server-Sent Events after each poll |
 | API | FastAPI, GeoJSON responses, interactive docs at `/docs` |
-
-Historical harmonization (MODIS/VIIRS calendar, climatology, anomalies) is in progress.
+| Burning activity calendar | `/history` routes: fire cell-days over time for a bbox, a biome or a drawn polygon, the normal year, anomalies, season dates, long-term trend and a map, on the harmonized MODIS/VIIRS record since 2000 |
 
 ## Quick start
 
@@ -46,11 +45,28 @@ docker build -t space-monkeys-back .
 docker run -p 8000:8000 --env-file .env space-monkeys-back
 ```
 
+The `/history` routes read a folder built by the pipeline (`python -m pipeline.serving brazil`, see "Historical pipeline"); it is not in the image. Mount it and point `HISTORY_DATA_DIR` at it, for example `-v $PWD/data/processed/brazil/serving:/srv/history -e HISTORY_DATA_DIR=/srv/history`. Without it, `/history` answers 503 and the real-time routes work as before.
+
 ## API
 
-**Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers: the real-time routes below (exist) and the `/history` routes of the burning activity calendar (planned: calendar, climatology, anomaly, season, trend, map, and areas drawn in the app). Every example in it is a real value from the FIRMS archive (Pantanal biome). Harmonized fields stay `null` until the harmonized record exists. `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract. Open it in any OpenAPI viewer to browse it.
+**Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
 
-Routes that run today:
+Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| GET | `/history/meta` | Coverage per sensor, biomes, harmonization method and status, model scores, known data gaps, limits |
+| POST | `/history/areas` | `{"geometry": <GeoJSON Polygon/MultiPolygon>}` → `area_id`, cells, bbox, biome shares |
+| GET | `/history/calendar?start&end&granularity=day\|week\|month` | Fire cell-days per bucket: harmonized (with interval and source), MODIS, VIIRS, provisional flag |
+| GET | `/history/climatology?series&granularity=week\|month` | Normal year over complete base years (default 2003 to last complete year): median, 10th/90th percentiles, mean |
+| GET | `/history/anomaly?start&end&series` | The period against the same calendar dates in every other base year: percentile, class below/normal/above/record |
+| GET | `/history/season?year&series` | Season start (10%), peak and end (90%) weeks, against the normal season |
+| GET | `/history/trend?series&start_year&end_year` | Yearly totals and Theil–Sen slope with 95% CI |
+| GET | `/history/map?start&end` | Fire cell-days per 0.1° cell with fire |
+
+The API never runs a model: it sums the serving table with DuckDB (about 0.1 s for a season, about 1 s for 23 years of a biome). Today MODIS still delivers data, so the harmonized series equals MODIS (source `modis`, interval of zero width); the VIIRS estimate is served after MODIS ends or after `pipeline.serving --switch-date`. Its interval is the monthly per-biome 90% band weighted by the area's biome shares, an approximation that is too narrow for small areas.
+
+Real-time routes:
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -102,6 +118,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FUSION_RADIUS_KM` | `2` | Base linking distance |
 | `FUSION_WINDOW_HOURS` | `12` | Linking time window |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins |
+| `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 
 ## Project layout
 
@@ -109,7 +126,10 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 app/
   main.py            FastAPI app, CORS, worker lifecycle
   config.py          settings
-  api/               HTTP routes (system, live)
+  api/               HTTP routes (system, live, history)
+  history/
+    store.py         serving table access (DuckDB), areas (bbox, biome, drawn polygon)
+    analytics.py     calendar buckets, normal year, anomaly, season, trend
   realtime/
     firms.py         NASA FIRMS reader
     goes.py          GOES ABI fire product reader + fixed-grid projection
@@ -128,6 +148,7 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
   harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
   figures.py         validation figures (docs/figures/)
+  serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
 docs/api/openapi.yaml  API contract with the frontend
 tests/
 ```
@@ -242,6 +263,7 @@ python -m pipeline.training brazil --satellite N20     # national NOAA-20 table,
 python -m pipeline.harmonize brazil --satellite SNPP   # ~15 min, resumes saved folds
 python -m pipeline.harmonize brazil --satellite N20    # ~7 min
 python -m pipeline.figures brazil                      # docs/figures/*.png
+python -m pipeline.serving brazil                      # the table /history reads, ~20 s
 ```
 
 **What the harmonized series is.** MODIS observed while MODIS delivers data. When MODIS ends (or earlier, at a switch date the team may set if MODIS orbital drift makes it unreliable), it becomes the MODIS-equivalent estimate from VIIRS: S-NPP until it ended (2026-11-02), then NOAA-20. The estimate is computed for every day since 2012 anyway, to check that the hand-over has no step.
