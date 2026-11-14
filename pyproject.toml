@@ -25,9 +25,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# Historical pipeline (pipeline/). Kept out of the API image on purpose.
+science = ["duckdb>=1.1", "pyarrow>=17", "lightgbm>=4.5", "torch>=2.4"]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "pipeline*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

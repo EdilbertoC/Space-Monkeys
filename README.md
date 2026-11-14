@@ -114,8 +114,28 @@ app/
     pulse.py         publish/subscribe for SSE clients
     worker.py        polling loop
   fusion/fuse.py     multi-sensor fusion
+pipeline/            historical batch pipeline (needs the [science] extra)
+  ingest.py          FIRMS archive zips -> Parquet detections table
 tests/
 ```
+
+## Historical pipeline
+
+The batch side reads the FIRMS archive and never runs inside the API.
+
+```bash
+pip install -e ".[dev,science]"
+# put the FIRMS archive zips in data/raw/firms/<region>/, e.g. data/raw/firms/pantanal/
+python -m pipeline.ingest pantanal
+```
+
+`ingest` writes `data/processed/<region>/detections/year=YYYY/*.parquet` and `ingest_report.json` (rows read, dropped and kept per source). By default it:
+
+- keeps confidence classes nominal and high for both sensors (MODIS 30–100, VIIRS `n`/`h`); `--min-confidence-class l` keeps everything;
+- drops static land sources using one mask for every sensor: points within ~1 km of a location VIIRS labels as volcano or static source (FIRMS `type` 1 or 2). MODIS type 2 labels are not used for the mask because in the Pantanal they are scattered and peak in the fire season, like vegetation fires;
+- keeps FIRMS `type` 3 ("offshore"): in the Pantanal these are fires over the seasonal wetland water mask.
+
+`data/` is not committed.
 
 ## Data sources
 
@@ -129,6 +149,15 @@ Every dataset this project reads, with its citation.
 - **VIIRS NOAA-21 (JPSS-2) 375 m active fire, NRT** (`VJ214IMGTDL_NRT`, source `VIIRS_NOAA21_NRT`). NASA VIIRS Land Science Team (2024), NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/VIIRS/VJ214IMG_NRT.002
 - **MODIS Collection 6.1 active fire, NRT** (`MCD14DL`, source `MODIS_NRT`), Terra and Aqua, 1 km. https://doi.org/10.5067/FIRMS/MODIS/MCD14DL.NRT.0061
 - FIRMS FAQ (attribute meanings, e.g. `scan`/`track` pixel sizes): https://www.earthdata.nasa.gov/data/tools/firms/faq
+
+Historical record (pipeline), from the FIRMS archive download (https://firms.modaps.eosdis.nasa.gov/download/), CSV, one request per sensor:
+
+- **MODIS Collection 6.1 standard active fire locations** (`MCD14ML`, file `fire_archive_M-C61_*`), Terra (from 2000-11-01) and Aqua (from 2002-07-04), processed by the University of Maryland with a ~3-month lag and distributed by FIRMS.
+- **VIIRS 375 m standard active fire product, Collection 2**: S-NPP (`VNP14IMGTML`, file `fire_archive_SV-C2_*`, from 2012-01-20), NOAA-20 (file `fire_archive_J1V-C2_*`, from 2018-04-01) and NOAA-21 (file `fire_archive_J2V-C2_*`, from 2023-03-01), processed by the University of Maryland and distributed by FIRMS.
+- The months the standard archive has not reached yet come in the same download as NRT files (`fire_nrt_*`, the NRT products listed above) and are flagged `processing = NRT`.
+- Product names and the known MODIS archive gaps (late June to early July 2001, parts of 2002, mid-August 2007, 21–22 April 2009) are from the FIRMS download Readme: https://firms.modaps.eosdis.nasa.gov/download/Readme.txt
+- Attribute fields (including `type`: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore): https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs
+- Pilot area: box west −60, south −22.5, east −54.5, north −15 (Pantanal), 2000-11-01 to 2026-11-14.
 
 We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's Earth Science Data and Information System (ESDIS), with funding provided by NASA Headquarters.
 
@@ -159,6 +188,9 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | FastAPI, Pydantic, pydantic-settings, pytest, Ruff | MIT |
 | Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py | BSD-3-Clause |
 | xarray | Apache-2.0 |
+| DuckDB, LightGBM (pipeline, optional `[science]` extra) | MIT |
+| PyArrow (pipeline) | Apache-2.0 |
+| PyTorch (pipeline) | BSD-3-Clause |
 | Python | PSF License |
 
 ## NASA Space Apps Challenge 2026 compliance
