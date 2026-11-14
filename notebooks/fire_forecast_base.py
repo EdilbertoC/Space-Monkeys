@@ -66,7 +66,7 @@ LEADS = 7  # forecast days +1 … +7
 CLIM_HALF_WINDOW = 7  # climatology is smoothed over ±7 days of the year
 
 # Set to True to keep downloads and outputs in Google Drive between sessions.
-USE_DRIVE = False
+USE_DRIVE = True
 
 # %%
 WORK = Path("work")
