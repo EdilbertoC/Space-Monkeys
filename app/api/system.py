@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_broker, get_state, get_worker

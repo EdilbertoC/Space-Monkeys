@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """Live endpoints: fused fires, raw recent detections and the SSE pulse stream."""
 
 import asyncio

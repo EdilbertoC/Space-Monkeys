@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """Common table format for hotspot detections from every sensor.
 
 Every reader (FIRMS, GOES) returns a DataFrame with exactly these columns, so the

@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """Multi-sensor fusion of hotspot detections into fire events.
 
 A hotspot is the centre of a satellite pixel, so its true position lies somewhere

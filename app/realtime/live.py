@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """Live state: recent detections from every sensor and the fire events fused from them."""
 
 from dataclasses import dataclass, field

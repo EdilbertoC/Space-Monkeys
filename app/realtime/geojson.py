@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """GeoJSON serialization for fused fires and raw detections."""
 
 import math

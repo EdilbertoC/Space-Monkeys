@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """In-process publish/subscribe for the live pulse (one queue per SSE client)."""
 
 import asyncio

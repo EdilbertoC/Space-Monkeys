@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """Real-time worker: polls GOES and FIRMS, fuses detections and publishes the pulse."""
 
 import asyncio

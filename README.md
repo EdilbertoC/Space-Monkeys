@@ -132,6 +132,8 @@ Every dataset this project reads, with its citation.
 
 We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's Earth Science Data and Information System (ESDIS), with funding provided by NASA Headquarters.
 
+License: NASA Earth science data are openly shared without restriction under the [EOSDIS Data Use Policy](https://www.earthdata.nasa.gov/engage/open-data-services-software-policies/data-use-guidance).
+
 ### NOAA GOES-R Series
 
 - **GOES-19 (GOES-East) ABI L2+ Fire/Hot Spot Characterization, Full Disk** (`ABI-L2-FDCF`), every 10 min, ~2 km at nadir. NOAA / GOES-R Series Program.
@@ -139,6 +141,8 @@ We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's E
 - GOES-R Product Definition and User's Guide (PUG), Volume 5: Level 2+ Products (fire mask codes, fixed-grid projection), and the ABI Fire/Hot Spot Characterization ATBD: https://www.goes-r.gov/resources/docs.html
 - GOES-19 ABI L2 Fire/Hot Spot Provisional maturity ReadMe (known issues): https://noaasis.noaa.gov/pdf/ps-pvr/goes19/ABI/Fires%20and%20Hot%20Spots%20Characterization/Provisional/GOES-19_ABI_L2_FireHotSpot_Provisional_ReadMe.pdf
 - Band and mask-code summary (Google Earth Engine catalog): https://developers.google.com/earth-engine/datasets/catalog/NOAA_GOES_19_FDCF
+
+License: NOAA data distributed through NODD are open and free to use without restriction (see the AWS registry entry above).
 
 ### Algorithm references
 
@@ -148,4 +152,31 @@ We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's E
 
 ### Software
 
-FastAPI, Uvicorn, Pydantic, httpx, NumPy, pandas, SciPy, xarray, h5netcdf/h5py, pytest, Ruff. Versions in [pyproject.toml](pyproject.toml).
+All open source; versions in [pyproject.toml](pyproject.toml).
+
+| Library | License |
+| --- | --- |
+| FastAPI, Pydantic, pydantic-settings, pytest, Ruff | MIT |
+| Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py | BSD-3-Clause |
+| xarray | Apache-2.0 |
+| Python | PSF License |
+
+## NASA Space Apps Challenge 2026 compliance
+
+- **NASA data:** the project's core uses NASA FIRMS (VIIRS and MODIS active fire data). NOAA GOES data complement it.
+- **References:** every dataset, document and library used is listed above, with its license.
+- **License:** our original code is released under the [Apache License 2.0](LICENSE).
+- **Language:** all code, documentation and project materials are in English.
+- **No personal data** and no images, voices or likenesses of anyone under 18.
+- **No NASA logos or branding** in generated content.
+
+### Use of Super Intelligence (SI)
+
+The team designed the solution: a burning activity calendar from harmonized hotspots, a live map refreshed on a pulse of real-time data, and refinement of hotspot positions after harmonization.
+
+SI was used as a coding assistant:
+
+- **Tool:** Claude (Anthropic), a large language model, used through Claude Code.
+- **What it did:** wrote most of the backend code, tests and documentation in this repository from the team's design and instructions, looked up data access details (FIRMS API, GOES file layout, product DOIs), and checked the code against real GOES-19 data.
+- **Review:** every SI-assisted file is reviewed and run by the team. Each one starts with the line `# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team.`
+- **Not used for:** data values. All detections come straight from the public NASA and NOAA sources above; nothing is generated or simulated.

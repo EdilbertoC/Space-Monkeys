@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """NOAA GOES-East ABI L2 Fire/Hot Spot Characterization (FDC) reader.
 
 The Full Disk product (ABI-L2-FDCF) covers South America every 10 minutes at ~2 km

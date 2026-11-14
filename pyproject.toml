@@ -1,5 +1,6 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +8,7 @@ name = "space-monkeys-back"
 version = "0.1.0"
 description = "Burning activity calendar backend: harmonized satellite fire hotspots, real-time pulse and multi-sensor fusion."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

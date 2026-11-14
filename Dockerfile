@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

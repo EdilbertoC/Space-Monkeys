@@ -1,3 +1,4 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """NASA FIRMS near-real-time reader (MODIS and VIIRS active fire hotspots).
 
 API: https://firms.modaps.eosdis.nasa.gov/api/area/
