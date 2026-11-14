@@ -117,6 +117,7 @@ app/
 pipeline/            historical batch pipeline (needs the [science] extra)
   ingest.py          FIRMS archive zips -> Parquet detections table
   cube.py            detections -> fire-day cube (0.1° cell x UTC day x satellite)
+  viewer.py          cube -> self-contained HTML viewer (dev tool), template in viewer_template.html
 tests/
 ```
 
@@ -146,6 +147,16 @@ The cube keeps each VIIRS satellite apart on purpose: in the Pantanal, P(MODIS |
 
 The cube is not yet clipped to land or to a country: the region box also covers sea and neighbouring countries.
 
+To look at a cube (a development tool, not the product frontend):
+
+```bash
+python -m pipeline.viewer pantanal              # data/processed/pantanal/viewer.html, ~2 MB
+python -m pipeline.viewer brazil --factor 10    # national cube needs coarser 1° cells, or --bbox
+python -m http.server 8765 --directory data/processed   # then open http://localhost:8765/pantanal/viewer.html
+```
+
+The page shows MODIS and VIIRS fire-days side by side on a map for any year and month, a burning activity calendar (years × weeks) and the selected year against the 10th–90th percentile of the other years, for the whole region, one clicked cell or a drawn box. All counts are computed in the browser from the cube's fire cell-days.
+
 `data/` is not committed.
 
 ## Data sources
@@ -169,6 +180,11 @@ Historical record (pipeline), from the FIRMS archive download (https://firms.mod
 - Product names and the known MODIS archive gaps (late June to early July 2001, parts of 2002, mid-August 2007, 21–22 April 2009) are from the FIRMS download Readme: https://firms.modaps.eosdis.nasa.gov/download/Readme.txt
 - Attribute fields (including `type`: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore): https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs
 - Pilot area: box west −60, south −22.5, east −54.5, north −15 (Pantanal), 2000-11-01 to 2026-11-14.
+- National area: box west −74.5, south −34.5, east −28.5, north 6 (Brazil and surroundings), same dates (requests 848644–848647).
+
+### Basemap (cube viewer only)
+
+- OpenStreetMap standard tiles, © OpenStreetMap contributors, data under the Open Database License (ODbL): https://www.openstreetmap.org/copyright. Used lightly for a development viewer, following the tile usage policy: https://operations.osmfoundation.org/policies/tiles/
 
 We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's Earth Science Data and Information System (ESDIS), with funding provided by NASA Headquarters.
 
@@ -202,6 +218,7 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | DuckDB, LightGBM (pipeline, optional `[science]` extra) | MIT |
 | PyArrow (pipeline) | Apache-2.0 |
 | PyTorch (pipeline) | BSD-3-Clause |
+| Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |
 
 ## NASA Space Apps Challenge 2026 compliance

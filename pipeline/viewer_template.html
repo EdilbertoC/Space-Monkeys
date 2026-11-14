@@ -1,0 +1,678 @@
+<!doctype html>
+<!-- SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fire-Day Cube Viewer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface-1: #fcfcfb;
+  --surface-3: #f0efec;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-year: #eb6834;
+  --band: rgba(137, 135, 129, 0.18);
+  --select: #0b0b0b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --surface-3: #262624;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-year: #d95926;
+    --band: rgba(195, 194, 183, 0.16);
+    --select: #f0efec;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface-1: #1a1a19;
+  --surface-3: #262624;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --series-year: #d95926;
+  --band: rgba(195, 194, 183, 0.16);
+  --select: #f0efec;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; }
+h2 { font-size: 15px; margin: 0 0 2px; font-weight: 600; }
+.sub { color: var(--text-secondary); margin: 0 0 16px; }
+.note { color: var(--text-muted); font-size: 12px; margin: 4px 0 0; }
+.filters {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: end;
+  margin: 0 0 16px; padding: 12px; background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.filters label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-secondary); }
+select, button {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--axis); border-radius: 6px; padding: 5px 8px;
+}
+button { cursor: pointer; }
+button[aria-pressed="true"] { border-color: var(--select); box-shadow: inset 0 0 0 1px var(--select); }
+.area { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.area-label { font-size: 13px; color: var(--text-secondary); }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.tile .k { font-size: 12px; color: var(--text-secondary); }
+.tile .v { font-size: 24px; font-weight: 600; margin-top: 2px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+.maps { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.map { height: 360px; border-radius: 6px; margin-top: 8px; background: var(--surface-3); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.legend .sw { display: inline-block; width: 14px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+.legend .ln { display: inline-block; width: 16px; height: 0; border-top: 2px solid; vertical-align: 3px; margin-right: 4px; }
+.legend .ln.dash { border-top-style: dashed; }
+canvas { display: block; width: 100%; }
+#calendar-wrap { position: relative; margin-top: 8px; }
+#line { width: 100%; height: 280px; display: block; margin-top: 8px; }
+.tip {
+  position: fixed; pointer-events: none; z-index: 1000; display: none;
+  background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  max-width: 260px;
+}
+.tip .row { display: flex; gap: 6px; align-items: center; }
+.tip strong { font-weight: 650; }
+.tip .muted { color: var(--text-secondary); }
+.tip .key { display: inline-block; width: 12px; border-top: 2px solid; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--text-secondary); font-weight: 600; }
+details summary { cursor: pointer; font-weight: 600; }
+.leaflet-container { font: inherit; }
+.leaflet-tile-pane { filter: grayscale(1) opacity(0.55); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .leaflet-tile-pane { filter: grayscale(1) invert(1) brightness(0.8) opacity(0.6); }
+}
+:root[data-theme="dark"] .leaflet-tile-pane { filter: grayscale(1) invert(1) brightness(0.8) opacity(0.6); }
+.leaflet-tooltip { background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); }
+footer { color: var(--text-muted); font-size: 12px; margin-top: 24px; }
+@media (max-width: 760px) {
+  .maps { grid-template-columns: 1fr; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .map { height: 300px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Fire-day cube</h1>
+  <p class="sub" id="subtitle"></p>
+
+  <div class="filters" role="group" aria-label="Filters">
+    <label>Year <select id="year"></select></label>
+    <label>Month <select id="month"></select></label>
+    <label>Calendar sensor
+      <select id="sensor">
+        <option value="1">MODIS</option>
+        <option value="2">VIIRS</option>
+        <option value="3">Either (MODIS or VIIRS)</option>
+      </select>
+    </label>
+    <div class="area">
+      <span class="area-label">Area: <strong id="area-name">whole region</strong></span>
+      <button id="box-btn" aria-pressed="false" type="button">Draw box</button>
+      <button id="reset-btn" type="button">Whole region</button>
+    </div>
+  </div>
+
+  <div class="tiles" aria-live="polite">
+    <div class="tile"><div class="k">MODIS fire cell-days</div><div class="v" id="t-modis">–</div></div>
+    <div class="tile"><div class="k">VIIRS fire cell-days</div><div class="v" id="t-viirs">–</div></div>
+    <div class="tile"><div class="k">Seen by both</div><div class="v" id="t-both">–</div></div>
+    <div class="tile"><div class="k">P(MODIS | VIIRS)</div><div class="v" id="t-p">–</div></div>
+  </div>
+
+  <section class="card">
+    <h2 id="map-title">Fire-days per cell</h2>
+    <p class="note">Click a cell to make it the area, or use “Draw box” and click two corners. Same colour scale on both maps; each colour step holds about the same number of cells.</p>
+    <div class="maps">
+      <div><strong>MODIS</strong> <span class="note">Terra + Aqua, 1 km pixels</span><div class="map" id="map-modis" aria-label="MODIS map"></div></div>
+      <div><strong>VIIRS</strong> <span class="note">S-NPP, NOAA-20, NOAA-21, 375 m pixels</span><div class="map" id="map-viirs" aria-label="VIIRS map"></div></div>
+    </div>
+    <div class="legend" id="map-legend"></div>
+  </section>
+
+  <section class="card">
+    <h2 id="cal-title">Burning activity calendar</h2>
+    <p class="note" id="cal-note"></p>
+    <div id="calendar-wrap"><canvas id="calendar" role="img" aria-label="Calendar heatmap of weekly fire cell-days by year"></canvas></div>
+    <div class="legend" id="cal-legend"></div>
+  </section>
+
+  <section class="card">
+    <h2 id="line-title">Selected year against the other years</h2>
+    <p class="note" id="line-note"></p>
+    <svg id="line" role="img" aria-label="Weekly fire cell-days for the selected year against the other years"></svg>
+    <div class="legend" id="line-legend"></div>
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>Table: fire cell-days per year in the area</summary>
+      <table id="year-table"><thead><tr><th>Year</th><th>MODIS</th><th>VIIRS</th><th>Both</th><th>Either</th><th>P(MODIS | VIIRS)</th></tr></thead><tbody></tbody></table>
+    </details>
+  </section>
+
+  <footer id="footer"></footer>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+const D = /*__CUBE_DATA__*/null;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const SENSOR_NAME = { 1: "MODIS", 2: "VIIRS", 3: "Either" };
+const MODIS_START = Date.UTC(2000, 10, 1);
+const VIIRS_START = Date.UTC(2012, 0, 20);
+const DAY_MS = 86400000;
+const fmt = new Intl.NumberFormat("en-US");
+
+// ---- decode the cube --------------------------------------------------------
+const nCells = D.cells.length;
+const N = D.records.length;
+const recDay = new Int32Array(N), recCell = new Int32Array(N), recFlag = new Uint8Array(N);
+{
+  let v = 0;
+  for (let i = 0; i < N; i++) {
+    v += D.records[i];
+    const f = v % 4, q = (v - f) / 4, c = q % nCells;
+    recFlag[i] = f; recCell[i] = c; recDay[i] = (q - c) / nCells;
+  }
+}
+const g = D.grid_degrees;
+const first = Date.parse(D.first_date + "T00:00:00Z");
+const nDays = D.n_days;
+const lastMs = first + (nDays - 1) * DAY_MS;
+const dayYear = new Int16Array(nDays), dayMonth = new Int8Array(nDays), dayWeek = new Int8Array(nDays);
+for (let d = 0; d < nDays; d++) {
+  const t = new Date(first + d * DAY_MS);
+  const y = t.getUTCFullYear();
+  const doy = Math.floor((t - Date.UTC(y, 0, 1)) / DAY_MS);
+  dayYear[d] = y; dayMonth[d] = t.getUTCMonth(); dayWeek[d] = Math.min(51, Math.floor(doy / 7));
+}
+const firstYear = dayYear[0], lastYear = dayYear[nDays - 1];
+const years = []; for (let y = firstYear; y <= lastYear; y++) years.push(y);
+const lastFullYear = new Date(lastMs).getUTCMonth() === 11 && new Date(lastMs).getUTCDate() === 31 ? lastYear : lastYear - 1;
+
+function weekRange(y, w) {
+  const s = Date.UTC(y, 0, 1) + w * 7 * DAY_MS;
+  const e = w === 51 ? Date.UTC(y, 11, 31) : s + 6 * DAY_MS;
+  const f = (t) => { const d = new Date(t); return MONTHS[d.getUTCMonth()] + " " + d.getUTCDate(); };
+  return f(s) + "–" + f(e);
+}
+// Does a sensor have data for (year, week)? Weeks before a sensor starts or after the
+// last date are "no data", not zero.
+function hasData(sensor, y, w) {
+  const s = Date.UTC(y, 0, 1) + w * 7 * DAY_MS;
+  const e = w === 51 ? Date.UTC(y, 11, 31) : s + 6 * DAY_MS;
+  const start = sensor === 1 ? MODIS_START : (sensor === 2 ? VIIRS_START : MODIS_START);
+  return e >= start && s <= lastMs;
+}
+
+// ---- state ------------------------------------------------------------------
+const yearSel = document.getElementById("year");
+const monthSel = document.getElementById("month");
+const sensorSel = document.getElementById("sensor");
+yearSel.append(new Option("All years", "all"));
+for (const y of years.slice().reverse()) yearSel.append(new Option(String(y), String(y)));
+monthSel.append(new Option("All months", "all"));
+MONTHS.forEach((m, i) => monthSel.append(new Option(m, String(i))));
+yearSel.value = years.includes(2020) ? "2020" : String(lastFullYear);
+
+const selected = new Uint8Array(nCells).fill(1);
+let areaName = "whole region";
+let selBounds = null;
+
+// ---- colour scales ----------------------------------------------------------
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const RAMP_LIGHT = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
+const dark = () => css("color-scheme") === "dark";
+const ramp = () => (dark() ? RAMP_LIGHT.slice().reverse() : RAMP_LIGHT);
+// Quantile bins over the non-zero values on screen: each colour holds about the
+// same number of cells (or weeks), so the pattern shows at any scale.
+function makeBins(values) {
+  const xs = [];
+  for (const v of values) if (v > 0) xs.push(v);
+  xs.sort((a, b) => a - b);
+  const edges = [1];
+  for (let i = 1; i < 7 && xs.length; i++) {
+    const e = Math.ceil(xs[Math.min(xs.length - 1, Math.floor((xs.length * i) / 7))]);
+    if (e > edges[edges.length - 1]) edges.push(e);
+  }
+  return edges;
+}
+function colorFor(v, edges) {
+  let k = 0;
+  while (k + 1 < edges.length && v >= edges[k + 1]) k++;
+  const r = ramp();
+  return r[Math.round(k * (r.length - 1) / Math.max(edges.length - 1, 1))];
+}
+function legend(el, edges, max, extra) {
+  el.replaceChildren();
+  edges.forEach((lo, k) => {
+    const hi = k + 1 < edges.length ? edges[k + 1] - 1 : max;
+    const item = document.createElement("span");
+    const sw = document.createElement("span");
+    sw.className = "sw"; sw.style.background = colorFor(lo, edges);
+    item.append(sw, document.createTextNode(lo === hi ? fmt.format(lo) : fmt.format(lo) + "–" + fmt.format(hi)));
+    el.append(item);
+  });
+  for (const [label, bg, border] of extra || []) {
+    const item = document.createElement("span");
+    const sw = document.createElement("span");
+    sw.className = "sw"; sw.style.background = bg; if (border) sw.style.border = "1px solid " + border;
+    item.append(sw, document.createTextNode(label));
+    el.append(item);
+  }
+}
+
+// ---- tooltip ----------------------------------------------------------------
+const tip = document.getElementById("tip");
+function showTip(x, y, rows) {
+  tip.replaceChildren();
+  for (const r of rows) {
+    const div = document.createElement("div");
+    div.className = "row";
+    if (r.key) { const k = document.createElement("span"); k.className = "key"; k.style.borderTopColor = r.key; if (r.dash) k.style.borderTopStyle = "dashed"; div.append(k); }
+    if (r.value !== undefined) { const s = document.createElement("strong"); s.textContent = r.value; div.append(s); }
+    if (r.label) { const s = document.createElement("span"); s.className = r.value !== undefined ? "muted" : ""; s.textContent = r.label; div.append(s); }
+    tip.append(div);
+  }
+  tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(window.innerWidth - w - 8, x + 14) + "px";
+  tip.style.top = Math.max(8, y - h - 10) + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+
+// ---- aggregation ------------------------------------------------------------
+function inPeriod(d) {
+  const y = yearSel.value, m = monthSel.value;
+  return (y === "all" || dayYear[d] === +y) && (m === "all" || dayMonth[d] === +m);
+}
+function aggregate() {
+  const sensor = +sensorSel.value;
+  const mapM = new Int32Array(nCells), mapV = new Int32Array(nCells);
+  const nY = years.length;
+  const week = { 1: new Int32Array(nY * 52), 2: new Int32Array(nY * 52), 3: new Int32Array(nY * 52) };
+  const perYear = years.map((y) => ({ year: y, modis: 0, viirs: 0, both: 0, either: 0 }));
+  const tiles = { modis: 0, viirs: 0, both: 0 };
+  for (let i = 0; i < N; i++) {
+    const d = recDay[i], c = recCell[i], f = recFlag[i];
+    const p = inPeriod(d);
+    if (p) { if (f & 1) mapM[c]++; if (f & 2) mapV[c]++; }
+    if (!selected[c]) continue;
+    const yi = dayYear[d] - firstYear, wi = yi * 52 + dayWeek[d];
+    if (f & 1) week[1][wi]++;
+    if (f & 2) week[2][wi]++;
+    week[3][wi]++;
+    const py = perYear[yi];
+    if (f & 1) py.modis++;
+    if (f & 2) py.viirs++;
+    if (f === 3) py.both++;
+    py.either++;
+    if (p) { if (f & 1) tiles.modis++; if (f & 2) tiles.viirs++; if (f === 3) tiles.both++; }
+  }
+  return { sensor, mapM, mapV, week, perYear, tiles };
+}
+
+// ---- maps -------------------------------------------------------------------
+function tileLayer() {
+  // Standard OpenStreetMap tiles, faded (and inverted in dark mode) by CSS so the
+  // data stays the strongest ink. Light use only: https://operations.osmfoundation.org/policies/tiles/
+  return L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 12,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  });
+}
+function makeMap(id) {
+  const map = L.map(id, { preferCanvas: true, zoomSnap: 0.25 });
+  map._tiles = tileLayer().addTo(map);
+  return map;
+}
+const mapM = makeMap("map-modis"), mapV = makeMap("map-viirs");
+let south = 90, west = 180, north = -90, east = -180;
+for (const [s, w] of D.cells) { south = Math.min(south, s); west = Math.min(west, w); north = Math.max(north, s + g); east = Math.max(east, w + g); }
+const regionBounds = L.latLngBounds([south, west], [north, east]);
+mapM.fitBounds(regionBounds); mapV.fitBounds(regionBounds);
+let syncing = false;
+function sync(a, b) { a.on("move", () => { if (syncing) return; syncing = true; b.setView(a.getCenter(), a.getZoom(), { animate: false }); syncing = false; }); }
+sync(mapM, mapV); sync(mapV, mapM);
+
+const renderers = [L.canvas({ padding: 0.5 }), L.canvas({ padding: 0.5 })];
+let current = null;
+function cellRects(map, renderer, which) {
+  return D.cells.map(([s, w], c) => {
+    const r = L.rectangle([[s, w], [s + g, w + g]], { renderer, stroke: false, fillOpacity: 0, interactive: true });
+    r.bindTooltip(() => {
+      const el = document.createElement("div");
+      const v = current ? (which === 1 ? current.mapM[c] : current.mapV[c]) : 0;
+      const other = current ? (which === 1 ? current.mapV[c] : current.mapM[c]) : 0;
+      const a = document.createElement("strong"); a.textContent = fmt.format(v) + " fire-days";
+      const b = document.createElement("div"); b.textContent = (which === 1 ? "MODIS" : "VIIRS") + " · " + (which === 1 ? "VIIRS " : "MODIS ") + fmt.format(other);
+      const cc = document.createElement("div"); cc.textContent = `cell ${(s + g / 2).toFixed(2)}, ${(w + g / 2).toFixed(2)}`;
+      cc.style.color = "var(--text-secondary)";
+      el.append(a, b, cc);
+      return el;
+    }, { sticky: true });
+    r.on("click", () => { if (!boxMode) selectCells([c], `cell ${(s + g / 2).toFixed(2)}, ${(w + g / 2).toFixed(2)}`); });
+    r.addTo(map);
+    return r;
+  });
+}
+const rectsM = cellRects(mapM, renderers[0], 1);
+const rectsV = cellRects(mapV, renderers[1], 2);
+let outlines = [];
+function drawOutline() {
+  for (const o of outlines) o.remove();
+  outlines = [];
+  if (!selBounds) return;
+  for (const m of [mapM, mapV]) {
+    outlines.push(L.rectangle(selBounds, { color: css("--select"), weight: 2, dashArray: "4 3", fill: false, interactive: false }).addTo(m));
+  }
+}
+function renderMaps(a) {
+  let max = 1;
+  for (let c = 0; c < nCells; c++) max = Math.max(max, a.mapM[c], a.mapV[c]);
+  const both = new Int32Array(2 * nCells);
+  both.set(a.mapM); both.set(a.mapV, nCells);
+  const edges = makeBins(both);
+  const paint = (rects, counts) => rects.forEach((r, c) => {
+    const v = counts[c];
+    r.setStyle(v > 0 ? { fillColor: colorFor(v, edges), fillOpacity: 0.85 } : { fillOpacity: 0 });
+  });
+  paint(rectsM, a.mapM); paint(rectsV, a.mapV);
+  legend(document.getElementById("map-legend"), edges, max);
+  const y = yearSel.value === "all" ? "all years" : yearSel.value;
+  const m = monthSel.value === "all" ? "" : MONTHS[+monthSel.value] + " ";
+  document.getElementById("map-title").textContent = `Fire-days per ${g}° cell, ${m}${y}`;
+}
+
+// ---- area selection ---------------------------------------------------------
+let boxMode = false, boxCorner = null;
+const boxBtn = document.getElementById("box-btn");
+boxBtn.addEventListener("click", () => {
+  boxMode = !boxMode; boxCorner = null;
+  boxBtn.setAttribute("aria-pressed", String(boxMode));
+  boxBtn.textContent = boxMode ? "Click two corners…" : "Draw box";
+});
+for (const m of [mapM, mapV]) {
+  m.on("click", (e) => {
+    if (!boxMode) return;
+    if (!boxCorner) { boxCorner = e.latlng; return; }
+    const b = L.latLngBounds(boxCorner, e.latlng);
+    const ids = [];
+    D.cells.forEach(([s, w], c) => { if (b.contains([s + g / 2, w + g / 2])) ids.push(c); });
+    boxMode = false; boxCorner = null;
+    boxBtn.setAttribute("aria-pressed", "false"); boxBtn.textContent = "Draw box";
+    if (ids.length) selectCells(ids, `box of ${fmt.format(ids.length)} cells`);
+  });
+}
+function selectCells(ids, name) {
+  selected.fill(0);
+  let s = 90, w = 180, n = -90, e = -180;
+  for (const c of ids) {
+    selected[c] = 1;
+    const [cs, cw] = D.cells[c];
+    s = Math.min(s, cs); w = Math.min(w, cw); n = Math.max(n, cs + g); e = Math.max(e, cw + g);
+  }
+  selBounds = L.latLngBounds([s, w], [n, e]);
+  areaName = name;
+  update();
+}
+document.getElementById("reset-btn").addEventListener("click", () => {
+  selected.fill(1); selBounds = null; areaName = "whole region"; update();
+});
+
+// ---- calendar heatmap -------------------------------------------------------
+const cal = document.getElementById("calendar");
+let calGeom = null;
+function renderCalendar(a) {
+  const sensor = a.sensor, vals = a.week[sensor];
+  const wrap = cal.parentElement.getBoundingClientRect();
+  const labelW = 40, topH = 18, gap = 2;
+  const cw = Math.max(4, (wrap.width - labelW) / 52);
+  const ch = Math.max(8, Math.min(16, cw * 0.9));
+  const W = wrap.width, H = topH + years.length * ch;
+  const dpr = window.devicePixelRatio || 1;
+  cal.width = W * dpr; cal.height = H * dpr; cal.style.height = H + "px";
+  const ctx = cal.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  let max = 1;
+  for (const v of vals) max = Math.max(max, v);
+  const edges = makeBins(vals);
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.fillStyle = css("--text-muted");
+  ctx.textBaseline = "middle";
+  MONTHS.forEach((m, i) => {
+    const w = Math.floor((Date.UTC(2001, i, 1) - Date.UTC(2001, 0, 1)) / DAY_MS / 7);
+    ctx.fillText(m, labelW + w * cw, topH / 2);
+  });
+  const zero = css("--surface-3");
+  years.forEach((y, yi) => {
+    const yy = topH + yi * ch;
+    ctx.fillStyle = y === +yearSel.value ? css("--text-primary") : css("--text-muted");
+    ctx.fillText(String(y), 0, yy + ch / 2);
+    for (let w = 0; w < 52; w++) {
+      if (!hasData(sensor, y, w)) continue;
+      const v = vals[yi * 52 + w];
+      ctx.fillStyle = v > 0 ? colorFor(v, edges) : zero;
+      ctx.beginPath();
+      ctx.roundRect(labelW + w * cw + gap / 2, yy + gap / 2, cw - gap, ch - gap, 2);
+      ctx.fill();
+    }
+    if (y === +yearSel.value) {
+      ctx.strokeStyle = css("--select"); ctx.lineWidth = 1;
+      ctx.strokeRect(labelW + 0.5, yy + 0.5, 52 * cw - 1, ch - 1);
+    }
+  });
+  calGeom = { labelW, topH, cw, ch, vals, sensor };
+  legend(document.getElementById("cal-legend"), edges, max, [["0 fire cell-days", zero], ["no data", "transparent", css("--axis")]]);
+  document.getElementById("cal-title").textContent = `Burning activity calendar: weekly fire cell-days, ${SENSOR_NAME[sensor]}, ${areaName}`;
+  document.getElementById("cal-note").textContent = sensor === 3
+    ? "Either = MODIS or VIIRS on the same cell-day. Before 2012 only MODIS exists, so the step in 2012 is the sensor change, not more fire: this is what the harmonization will remove."
+    : sensor === 2
+      ? "VIIRS starts 2012-01-20; NOAA-20 joins in 2018 and NOAA-21 in 2023, so VIIRS counts are not comparable across those years yet."
+      : "MODIS is the long, consistent record (Terra from Nov 2000, Aqua from Jul 2002). FIRMS lists known gaps in 2001, 2002, 2007 and 2009.";
+}
+cal.addEventListener("pointermove", (e) => {
+  if (!calGeom) return;
+  const r = cal.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  const w = Math.floor((x - calGeom.labelW) / calGeom.cw), yi = Math.floor((y - calGeom.topH) / calGeom.ch);
+  if (w < 0 || w > 51 || yi < 0 || yi >= years.length) return hideTip();
+  const yr = years[yi];
+  const has = hasData(calGeom.sensor, yr, w);
+  showTip(e.clientX, e.clientY, [
+    { value: has ? fmt.format(calGeom.vals[yi * 52 + w]) : "no data", label: has ? "fire cell-days" : "" },
+    { label: `${yr} · ${weekRange(yr, w)} · ${SENSOR_NAME[calGeom.sensor]}` },
+  ]);
+});
+cal.addEventListener("pointerleave", hideTip);
+
+// ---- line chart: selected year vs the other years ---------------------------
+const svg = document.getElementById("line");
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+function quantile(sorted, q) {
+  if (!sorted.length) return 0;
+  const p = (sorted.length - 1) * q, lo = Math.floor(p), hi = Math.ceil(p);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (p - lo);
+}
+function renderLine(a) {
+  svg.replaceChildren();
+  const sensor = a.sensor, vals = a.week[sensor];
+  const year = yearSel.value === "all" ? lastFullYear : +yearSel.value;
+  const baseStart = sensor === 1 ? 2003 : 2013;
+  const base = years.filter((y) => y >= baseStart && y <= lastFullYear && y !== year);
+  const yi = year - firstYear;
+  const series = [], med = [], p10 = [], p90 = [];
+  for (let w = 0; w < 52; w++) {
+    series.push(hasData(sensor, year, w) ? vals[yi * 52 + w] : null);
+    const xs = base.map((y) => vals[(y - firstYear) * 52 + w]).sort((p, q) => p - q);
+    med.push(quantile(xs, 0.5)); p10.push(quantile(xs, 0.1)); p90.push(quantile(xs, 0.9));
+  }
+  document.getElementById("line-title").textContent = `${year} against ${base.length ? base[0] + "–" + base[base.length - 1] : "other years"}, weekly fire cell-days, ${SENSOR_NAME[sensor]}, ${areaName}`;
+  document.getElementById("line-note").textContent = (yearSel.value === "all" ? `No year picked, showing ${year}. ` : "") +
+    `Band: 10th–90th percentile of the other years; dashed line: their median.` + (sensor !== 1 ? " VIIRS years before 2018 had one satellite, later years two or three." : "");
+
+  const box = svg.getBoundingClientRect();
+  const W = box.width, H = box.height, m = { l: 48, r: 64, t: 10, b: 24 };
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  let max = 1;
+  for (let w = 0; w < 52; w++) max = Math.max(max, series[w] || 0, p90[w]);
+  const step = Math.pow(10, Math.floor(Math.log10(max)));
+  const yMax = Math.ceil(max / step) * step;
+  const x = (w) => m.l + (w / 51) * (W - m.l - m.r);
+  const y = (v) => H - m.b - (v / yMax) * (H - m.t - m.b);
+  const ticks = 4;
+  for (let i = 0; i <= ticks; i++) {
+    const v = (yMax / ticks) * i;
+    svg.append(el("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: i ? css("--grid") : css("--axis"), "stroke-width": 1 }));
+    const t = el("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end", "font-size": 11, fill: css("--text-muted") });
+    t.textContent = fmt.format(Math.round(v)); svg.append(t);
+  }
+  MONTHS.forEach((mo, i) => {
+    const w = Math.floor((Date.UTC(2001, i, 1) - Date.UTC(2001, 0, 1)) / DAY_MS / 7);
+    const t = el("text", { x: x(w), y: H - 6, "font-size": 11, fill: css("--text-muted") });
+    t.textContent = mo; svg.append(t);
+  });
+  if (base.length) {
+    let d = "";
+    for (let w = 0; w < 52; w++) d += (w ? "L" : "M") + x(w) + " " + y(p90[w]);
+    for (let w = 51; w >= 0; w--) d += "L" + x(w) + " " + y(p10[w]);
+    svg.append(el("path", { d: d + "Z", fill: css("--band"), stroke: "none" }));
+    let dm = "";
+    for (let w = 0; w < 52; w++) dm += (w ? "L" : "M") + x(w) + " " + y(med[w]);
+    svg.append(el("path", { d: dm, fill: "none", stroke: css("--text-secondary"), "stroke-width": 1.5, "stroke-dasharray": "5 4" }));
+    const lm = el("text", { x: x(51) + 6, y: y(med[51]) + 4, "font-size": 11, fill: css("--text-secondary") });
+    lm.textContent = "median"; svg.append(lm);
+  }
+  let ds = "", pen = false, lastW = -1;
+  for (let w = 0; w < 52; w++) {
+    if (series[w] === null) { pen = false; continue; }
+    ds += (pen ? "L" : "M") + x(w) + " " + y(series[w]); pen = true; lastW = w;
+  }
+  const yearColor = css("--series-year");
+  svg.append(el("path", { d: ds, fill: "none", stroke: yearColor, "stroke-width": 2, "stroke-linejoin": "round" }));
+  if (lastW >= 0) {
+    const ly = el("text", { x: x(lastW) + 6, y: y(series[lastW]) - 6, "font-size": 11, "font-weight": 600, fill: css("--text-primary") });
+    ly.textContent = String(year); svg.append(ly);
+  }
+  const cross = el("line", { y1: m.t, y2: H - m.b, stroke: css("--axis"), "stroke-width": 1, visibility: "hidden" });
+  const dot = el("circle", { r: 4, fill: yearColor, stroke: css("--surface-1"), "stroke-width": 2, visibility: "hidden" });
+  svg.append(cross, dot);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" });
+  svg.append(hit);
+  hit.addEventListener("pointermove", (e) => {
+    const r = svg.getBoundingClientRect();
+    const w = Math.max(0, Math.min(51, Math.round(((e.clientX - r.left) - m.l) / (W - m.l - m.r) * 51)));
+    cross.setAttribute("x1", x(w)); cross.setAttribute("x2", x(w)); cross.setAttribute("visibility", "visible");
+    if (series[w] !== null) { dot.setAttribute("cx", x(w)); dot.setAttribute("cy", y(series[w])); dot.setAttribute("visibility", "visible"); }
+    else dot.setAttribute("visibility", "hidden");
+    const rows = [{ label: `Week of ${weekRange(year, w)}` },
+      { key: yearColor, value: series[w] === null ? "no data" : fmt.format(series[w]), label: String(year) }];
+    if (base.length) {
+      rows.push({ key: css("--text-secondary"), dash: true, value: fmt.format(Math.round(med[w])), label: "median" });
+      rows.push({ value: `${fmt.format(Math.round(p10[w]))}–${fmt.format(Math.round(p90[w]))}`, label: "10th–90th pct" });
+    }
+    showTip(e.clientX, e.clientY, rows);
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTip(); });
+
+  const lg = document.getElementById("line-legend");
+  lg.replaceChildren();
+  const add = (cls, color, text) => {
+    const s = document.createElement("span"); const k = document.createElement("span");
+    k.className = cls; if (cls.startsWith("ln")) k.style.borderTopColor = color; else k.style.background = color;
+    s.append(k, document.createTextNode(text)); lg.append(s);
+  };
+  add("ln", yearColor, String(year));
+  if (base.length) { add("ln dash", css("--text-secondary"), "median of other years"); add("sw", css("--band"), "10th–90th percentile"); }
+}
+
+// ---- tiles and table --------------------------------------------------------
+function renderTiles(a) {
+  const t = a.tiles;
+  document.getElementById("t-modis").textContent = fmt.format(t.modis);
+  document.getElementById("t-viirs").textContent = t.viirs ? fmt.format(t.viirs) : "–";
+  document.getElementById("t-both").textContent = t.viirs ? fmt.format(t.both) : "–";
+  document.getElementById("t-p").textContent = t.viirs ? (t.both / t.viirs).toFixed(2) : "–";
+}
+function renderTable(a) {
+  const body = document.querySelector("#year-table tbody");
+  body.replaceChildren();
+  for (const r of a.perYear.slice().reverse()) {
+    const tr = document.createElement("tr");
+    const cells = [r.year, fmt.format(r.modis), r.viirs ? fmt.format(r.viirs) : "–", r.viirs ? fmt.format(r.both) : "–",
+      fmt.format(r.either), r.viirs ? (r.both / r.viirs).toFixed(3) : "–"];
+    for (const v of cells) { const td = document.createElement("td"); td.textContent = String(v); tr.append(td); }
+    body.append(tr);
+  }
+}
+
+// ---- wiring -----------------------------------------------------------------
+function update() {
+  current = aggregate();
+  document.getElementById("area-name").textContent = areaName;
+  renderMaps(current);
+  drawOutline();
+  renderTiles(current);
+  renderCalendar(current);
+  renderLine(current);
+  renderTable(current);
+}
+for (const s of [yearSel, monthSel, sensorSel]) s.addEventListener("change", update);
+let resizeTimer = null;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (current) { renderCalendar(current); renderLine(current); } }, 150); });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  for (const m of [mapM, mapV]) { m._tiles.remove(); m._tiles = tileLayer().addTo(m); }
+  update();
+});
+
+const regionTitle = D.region.charAt(0).toUpperCase() + D.region.slice(1);
+document.getElementById("title").textContent = `Fire-day cube: ${regionTitle}`;
+document.getElementById("subtitle").textContent =
+  `${fmt.format(N)} fire cell-days in ${fmt.format(nCells)} cells of ${g}°, ${D.first_date} to ${new Date(lastMs).toISOString().slice(0, 10)}. ` +
+  `A fire cell-day is a cell with at least one detection that UTC day. Raw, not yet harmonized: VIIRS sees more than MODIS by design.`;
+document.getElementById("footer").textContent =
+  `Data: NASA FIRMS archive download, MODIS C6.1 (MCD14ML) and VIIRS 375 m C2 (S-NPP, NOAA-20, NOAA-21), standard processing plus the near-real-time tail. ` +
+  `Processed with the Space Monkeys pipeline (ingest, cube); viewer generated ${D.generated}. Basemap © OpenStreetMap contributors.`;
+document.title = `Fire-Day Cube: ${regionTitle}`;
+update();
+</script>
+</body>
+</html>
