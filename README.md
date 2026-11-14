@@ -119,6 +119,7 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   cube.py            detections -> fire-day cube (0.1° cell x UTC day x satellite)
   viewer.py          cube -> self-contained HTML viewer (dev tool), template in viewer_template.html
   training.py        cube -> training table for the VIIRS -> MODIS calibration, one per VIIRS satellite
+  baselines.py       naive, ratio and LightGBM calibration, evaluated on the held-out years
 tests/
 ```
 
@@ -169,6 +170,30 @@ python -m pipeline.training pantanal --satellite N20    # train 2018–2022, tes
 - **Rows are picked by VIIRS only:** a cell-day is a row when the satellite saw fire in its 3×3 neighbourhood that day or the day before, the same rule that inference will use once MODIS is gone. Features never use MODIS.
 - **Coverage gap:** 74–90% of MODIS fire-days per year fall inside the rows (Pantanal, single satellite). The rest are mostly small, short daytime fires (81% single MODIS pixel, median FRP 15 MW vs 37 MW overall, mostly Terra at ~10:30 local, before the VIIRS ~13:30 pass). No row-based model can recover them; the harmonized totals must correct for this gap (step 8).
 - Only dates where MODIS and the satellite both have standard processing are used; NRT rows are left out.
+
+```bash
+python -m pipeline.baselines pantanal --satellite SNPP
+python -m pipeline.baselines pantanal --satellite N20
+```
+
+`baselines` predicts, for every row, the probability that MODIS saw fire, and writes `report.json`, `lightgbm.txt`, `ratio.json` and `test_predictions.parquet` to `data/processed/<region>/models/<SAT>/`. Three approaches on the same test years:
+
+- **naive:** "VIIRS saw fire, so MODIS would have", i.e. no harmonization;
+- **ratio:** share of MODIS fire in the training years per month, for cells with and without their own VIIRS detection;
+- **LightGBM:** all features, positive class weighted by n_negative / n_positive; the weight multiplies the predicted odds, so they are divided back to keep probabilities (and totals) honest. The last training year is used for early stopping.
+
+The calendar shows totals, so the main metrics are on totals: bias of the summed probabilities against MODIS fire-days, WAPE of monthly regional totals and of cell-month totals. Pantanal, test years only (MODIS fire-days inside the rows):
+
+| Satellite, test years | Model | Bias | Monthly WAPE | Cell-month WAPE | ROC AUC | Avg. precision |
+|---|---|---|---|---|---|---|
+| S-NPP, 2018–2026 | naive | +103.8% | 103.8% | 114.3% | 0.890 | 0.361 |
+| | ratio | −13.0% | 20.3% | 75.1% | 0.905 | 0.432 |
+| | **LightGBM** | **+0.1%** | **4.0%** | **48.4%** | **0.951** | **0.730** |
+| NOAA-20, 2023–2026 | naive | +98.6% | 98.6% | 107.6% | 0.896 | 0.379 |
+| | ratio | −7.7% | 22.6% | 72.6% | 0.910 | 0.457 |
+| | **LightGBM** | **−2.8%** | **4.8%** | **45.5%** | **0.955** | **0.750** |
+
+Yearly LightGBM totals stay within about ±5% of MODIS in every test year, including 2025–2026, so no strong MODIS drift shows up yet. Most of the LightGBM gain comes from the fire radiative power seen by VIIRS (`v_frp_sum`, ~70% of the gain): MODIS misses weak fires, and FRP measures how strong a fire is. Next: the U-Net (step 7) must beat these numbers on the same test years to be used.
 
 `data/` is not committed.
 
@@ -230,6 +255,7 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | xarray | Apache-2.0 |
 | DuckDB, LightGBM (pipeline, optional `[science]` extra) | MIT |
 | PyArrow (pipeline) | Apache-2.0 |
+| scikit-learn (pipeline metrics) | BSD-3-Clause |
 | PyTorch (pipeline) | BSD-3-Clause |
 | Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |
