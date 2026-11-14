@@ -55,17 +55,24 @@ def _table(data_dir: Path, region: str, satellite: str) -> str:
 
 
 def load_training_sample(
-    data_dir: Path, region: str, satellite: str, rate: float = SAMPLE_RATE
+    data_dir: Path,
+    region: str,
+    satellite: str,
+    rate: float = SAMPLE_RATE,
+    splits: tuple[str, ...] = ("train",),
 ) -> pd.DataFrame:
-    cols = ", ".join(FEATURES)
+    """Every own-detection row plus a hash-chosen `rate` of the neighbour/lag-only
+    rows (weight 1/rate), Brazil cells only. Features are read as 32-bit floats."""
+    cols = ", ".join(f"CAST({f} AS FLOAT) AS {f}" for f in FEATURES)
     keep = int(rate * 1000)
+    split_list = ", ".join(f"'{s}'" for s in splits)
     return (
         duckdb.connect()
         .execute(f"""
             SELECT {cols}, {TARGET}, year, biome,
                    CASE WHEN v_pixels > 0 THEN 1.0 ELSE {1 / rate} END AS w
             FROM {_table(data_dir, region, satellite)}
-            WHERE split = 'train' AND biome IS NOT NULL
+            WHERE split IN ({split_list}) AND biome IS NOT NULL
               AND (v_pixels > 0 OR hash(cell_id, date) % 1000 < {keep})
         """)
         .fetchdf()

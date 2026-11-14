@@ -126,6 +126,8 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   baselines.py       naive, ratio and LightGBM calibration, evaluated on the held-out years
   biomes.py          label each 0.1° cell with its IBGE biome (also clips the national cube to Brazil)
   crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
+  harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
+  figures.py         validation figures (docs/figures/)
 docs/api/openapi.yaml  API contract with the frontend
 tests/
 ```
@@ -233,6 +235,48 @@ What this shows:
 - Cell-month error stays high (43% in the Pantanal biome, 62–117% elsewhere): numbers for small areas need visible uncertainty.
 - Next for the model: the U-Net (step 7) must beat these numbers on the same test years to be used.
 
+### Harmonized record (step 8)
+
+```bash
+python -m pipeline.training brazil --satellite N20     # national NOAA-20 table, ~8 min
+python -m pipeline.harmonize brazil --satellite SNPP   # ~15 min, resumes saved folds
+python -m pipeline.harmonize brazil --satellite N20    # ~7 min
+python -m pipeline.figures brazil                      # docs/figures/*.png
+```
+
+**What the harmonized series is.** MODIS observed while MODIS delivers data. When MODIS ends (or earlier, at a switch date the team may set if MODIS orbital drift makes it unreliable), it becomes the MODIS-equivalent estimate from VIIRS: S-NPP until it ended (2026-11-02), then NOAA-20. The estimate is computed for every day since 2012 anyway, to check that the hand-over has no step.
+
+**How the VIIRS estimate is built** (`pipeline/harmonize.py`):
+
+1. **Cross-fitting by year blocks** (S-NPP: 2012–14, 2015–17, 2018–20, 2021–23, 2024–26; NOAA-20: 2018–19, 2020–21, 2022–23, 2024–26). Each block is predicted by a LightGBM trained on the other blocks only, so every year of the overlap gets an out-of-sample estimate.
+2. **Calibration per biome** (isotonic, on the out-of-fold probabilities).
+3. **Coverage gap**: per biome and calendar month, g = all MODIS fire-days / MODIS fire-days inside the rows; each probability is multiplied by g. An area's estimate is Σ p × g, an expected count of MODIS fire cell-days (not an integer).
+4. **90% interval** per biome from the 5th/95th percentiles of the relative error of monthly totals. It is calibrated at the biome-month scale: it is not valid for yearly totals (errors partly cancel across months) nor for small areas (larger). Scale-aware intervals are left for the analytics step.
+
+Outputs in `data/processed/brazil/harmonized/`: one row per cell-day with the observed MODIS flag and the estimate (`<SAT>/year=YYYY/`), monthly series per biome with interval (`<SAT>_monthly.parquet`), and calibrators, gap factors and scores (`<SAT>_model.json`).
+
+Out-of-fold scores (S-NPP 2012-01-20 to 2026-07-31; NOAA-20 2018-04-01 to 2026-07-31). The whole-period bias is about 0 by construction (calibration and gap are fitted on these same rows), so the monthly error is the number to read:
+
+| Area | Monthly WAPE, S-NPP | Monthly WAPE, NOAA-20 | Naive VIIRS (bias) | 90% band, monthly (S-NPP) |
+|---|---|---|---|---|
+| Brazil | 6.9% | 7.6% | +137% | — |
+| Amazon | 7.3% | 8.1% | +134% | −18% / +48% |
+| Cerrado | 7.5% | 8.6% | +112% | −23% / +57% |
+| Atlantic Forest | 9.7% | 9.7% | +194% | −18% / +44% |
+| Pantanal | 11.3% | 10.1% | +76% | −21% / +48% |
+| Pampa | 14.5% | 15.7% | +230% | −28% / +46% |
+| Caatinga | 15.8% | 19.1% | +188% | −30% / +41% |
+
+![Pantanal biome, 2020](docs/figures/pantanal_2020.png)
+
+![Brazil, fire cell-days per year](docs/figures/brazil_annual.png)
+
+What this shows and what is still open:
+
+- **The 2012 step is gone.** The naive record (MODIS, then VIIRS) more than doubles in 2012; the MODIS-equivalent estimate follows MODIS year by year. Pantanal 2020, from models that never saw 2020: the S-NPP estimate is within ±23% of MODIS every month (+8% to +10% at the August–September peak) and NOAA-20 tracks it closely, while S-NPP as seen is 29% to 112% above MODIS depending on the month.
+- **The estimate drifts low in recent years**, with both satellites independently: S-NPP from +1% to +5% (2012–2021) to −3% (2022), −6% (2023), −10% (2024) and −14% (2025); NOAA-20 −5%, −6%, −13% in 2023–2025. Two independent VIIRS satellites agreeing points to a change on the MODIS side or in the fires, not in one VIIRS sensor. For a fixed S-NPP signal, Terra's detection rate rises in 2023–2024 and Aqua's falls in 2025–2026, so the cause is not settled (MODIS orbital drift is the first suspect). Consequence: switching to the VIIRS estimate today would put a step of about −10% at the hand-over. Options: anchor the calibration to the most recent overlap years before switching, and carry this drift in the uncertainty of long-term trends.
+- Per-cell values remain much less certain than area totals; the gap of small fires is spread over cells where VIIRS saw activity.
+
 `data/` is not committed.
 
 ## Data sources
@@ -303,6 +347,7 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | openapi-spec-validator (contract tests) | Apache-2.0 |
 | jsonschema (contract tests) | MIT |
 | PyTorch (pipeline) | BSD-3-Clause |
+| Matplotlib (validation figures) | Matplotlib License (PSF-based, BSD-compatible) |
 | Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |
 
