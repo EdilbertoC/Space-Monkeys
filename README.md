@@ -118,6 +118,7 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   ingest.py          FIRMS archive zips -> Parquet detections table
   cube.py            detections -> fire-day cube (0.1° cell x UTC day x satellite)
   viewer.py          cube -> self-contained HTML viewer (dev tool), template in viewer_template.html
+  training.py        cube -> training table for the VIIRS -> MODIS calibration, one per VIIRS satellite
 tests/
 ```
 
@@ -156,6 +157,18 @@ python -m http.server 8765 --directory data/processed   # then open http://local
 ```
 
 The page shows MODIS and VIIRS fire-days side by side on a map for any year and month, a burning activity calendar (years × weeks) and the selected year against the 10th–90th percentile of the other years, for the whole region, one clicked cell or a drawn box. All counts are computed in the browser from the cube's fire cell-days.
+
+```bash
+python -m pipeline.training pantanal --satellite SNPP   # train 2012–2017, test 2018+
+python -m pipeline.training pantanal --satellite N20    # train 2018–2022, test 2023+
+```
+
+`training` writes `data/processed/<region>/training/<SAT>/year=YYYY/*.parquet` and `<SAT>_report.json`. The target is `modis`: did MODIS (Terra or Aqua) detect fire in the 0.1° cell that UTC day. Decisions:
+
+- **One table per VIIRS satellite.** Summed VIIRS is not stationary: NOAA-20 and NOAA-21 add pixels, so the same fire looks bigger after 2018, and the MODIS rate for a given VIIRS pixel count roughly halves from train to test. For S-NPP alone it is stable (Pantanal, 4–9 S-NPP pixels: P(MODIS) 0.60 in 2012–2017, 0.59 in 2018–2022, 0.57 in 2023–2026). S-NPP ends on 2026-11-02, so the record continues on NOAA-20.
+- **Rows are picked by VIIRS only:** a cell-day is a row when the satellite saw fire in its 3×3 neighbourhood that day or the day before, the same rule that inference will use once MODIS is gone. Features never use MODIS.
+- **Coverage gap:** 74–90% of MODIS fire-days per year fall inside the rows (Pantanal, single satellite). The rest are mostly small, short daytime fires (81% single MODIS pixel, median FRP 15 MW vs 37 MW overall, mostly Terra at ~10:30 local, before the VIIRS ~13:30 pass). No row-based model can recover them; the harmonized totals must correct for this gap (step 8).
+- Only dates where MODIS and the satellite both have standard processing are used; NRT rows are left out.
 
 `data/` is not committed.
 
