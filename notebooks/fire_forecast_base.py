@@ -69,13 +69,17 @@ CLIM_HALF_WINDOW = 7  # climatology is smoothed over ±7 days of the year
 USE_DRIVE = False
 
 # %%
+WORK = Path("work")
 if USE_DRIVE:
-    from google.colab import drive  # type: ignore
+    try:
+        from google.colab import drive  # type: ignore
 
-    drive.mount("/content/drive")
-    WORK = Path("/content/drive/MyDrive/space-monkeys")
-else:
-    WORK = Path("work")
+        drive.mount("/content/drive")
+        WORK = Path("/content/drive/MyDrive/space-monkeys")
+    except Exception as exc:  # e.g. the permission pop-up was closed or blocked
+        print(f"Google Drive not mounted ({exc}). Saving to the local session instead;")
+        print("download work/outputs from the Files panel before the session ends.")
+print("Working directory:", WORK.resolve())
 DATA_DIR = WORK / "firms"
 OUT_DIR = WORK / "outputs"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
