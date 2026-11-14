@@ -11,9 +11,12 @@ training table (pipeline.training). Compared on the same held-out years:
 - lightgbm: gradient-boosted trees on all features (pipeline.training.FEATURES).
   The positive class is weighted by n_negative / n_positive, as planned; that
   multiplies the predicted odds by the weight, so the odds are divided back
-  (p / (p + (1 - p) * w)) to keep probabilities, and therefore totals, honest.
-  The last training year is held out for early stopping, then the model is
-  refit on all training years with the best number of rounds.
+  (p / (p + (1 - p) * w)). That alone left the national model 5% low even on its
+  training years, so the probabilities are then calibrated: the last training
+  year is held out, used for early stopping and to fit an isotonic regression
+  from the model's probability to the observed MODIS rate (which makes the
+  held-out year's total match exactly). The model is not refit afterwards, so the
+  calibration never sees data the trees were trained on.
 
 Metrics (test years only):
 
@@ -26,7 +29,7 @@ Totals cover MODIS fire-days inside the rows only; the coverage gap reported by
 pipeline.training is corrected later (step 8).
 
 Output: data/processed/<region>/models/<SAT>/ (report.json, lightgbm.txt,
-ratio.json, test_predictions.parquet)
+calibration.json, ratio.json, test_predictions.parquet)
 
 Usage::
 
@@ -43,6 +46,7 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
 from pipeline.training import FEATURES, SATELLITES, TARGET
@@ -118,11 +122,30 @@ def unweight(p: np.ndarray, w: float) -> np.ndarray:
     return p / (p + (1.0 - p) * w)
 
 
+def fit_calibration(p: np.ndarray, y: np.ndarray, w: np.ndarray | None = None) -> dict:
+    """Isotonic map from predicted probability to observed rate, as interpolation
+    points. Isotonic regression keeps the weighted total: sum(w * p_cal) = sum(w * y)."""
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    iso.fit(p, y, sample_weight=w)
+    return {"x": iso.X_thresholds_.tolist(), "y": iso.y_thresholds_.tolist()}
+
+
+def apply_calibration(p: np.ndarray, calibrator: dict | None) -> np.ndarray:
+    if not calibrator:
+        return np.asarray(p, dtype=float)
+    return np.interp(p, calibrator["x"], calibrator["y"])
+
+
 def fit_lightgbm(
     train: pd.DataFrame, valid_year: int, weight: str | None = None
 ) -> tuple[lgb.Booster, dict]:
-    """Fit with the positive class weighted; `weight` names a row-weight column
-    (e.g. for down-sampled rows), used in the class weight and in training."""
+    """Fit with the positive class weighted, then calibrate on the held-out year.
+
+    `weight` names a row-weight column (e.g. for down-sampled rows), used in the
+    class weight, in training and in the calibration. info["calibrator"] is None
+    when the held-out year cannot be used (too few rows or no fire), and the model
+    is then trained on every year without calibration.
+    """
     rw = train[weight].to_numpy() if weight else None
     w = positive_weight(train[TARGET], rw)
     params = {**LGB_PARAMS, "scale_pos_weight": w}
@@ -131,22 +154,50 @@ def fit_lightgbm(
         return lgb.Dataset(part[FEATURES], part[TARGET], weight=part[weight] if weight else None)
 
     fit_part, valid = train[train["year"] < valid_year], train[train["year"] == valid_year]
-    best_rounds = MAX_ROUNDS
-    if len(fit_part) and len(valid) and valid[TARGET].nunique() == 2:
-        booster = lgb.train(
-            params,
-            ds(fit_part),
-            num_boost_round=MAX_ROUNDS,
-            valid_sets=[ds(valid)],
-            callbacks=[lgb.early_stopping(EARLY_STOP, verbose=False)],
-        )
-        best_rounds = booster.best_iteration or MAX_ROUNDS
-    final = lgb.train(params, ds(train), best_rounds)
-    return final, {"positive_weight": w, "rounds": best_rounds, "valid_year": valid_year}
+    info = {"positive_weight": w, "valid_year": valid_year, "calibrator": None}
+    if not (len(fit_part) and len(valid) and valid[TARGET].nunique() == 2):
+        booster = lgb.train(params, ds(train), MAX_ROUNDS)
+        return booster, {**info, "rounds": MAX_ROUNDS}
+
+    booster = lgb.train(
+        params,
+        ds(fit_part),
+        num_boost_round=MAX_ROUNDS,
+        valid_sets=[ds(valid)],
+        callbacks=[lgb.early_stopping(EARLY_STOP, verbose=False)],
+    )
+    p_valid = unweight(booster.predict(valid[FEATURES]), w)
+    vw = valid[weight].to_numpy() if weight else np.ones(len(valid))
+    y_valid = valid[TARGET].to_numpy()
+    total = float((vw * y_valid).sum())
+    info.update(
+        rounds=booster.best_iteration or MAX_ROUNDS,
+        calibrator=fit_calibration(p_valid, y_valid, vw),
+        valid_bias_before_calibration=round(float((vw * p_valid).sum()) / total - 1, 4),
+    )
+    return booster, info
 
 
-def lightgbm_predict(booster: lgb.Booster, df: pd.DataFrame, w: float) -> np.ndarray:
-    return unweight(booster.predict(df[FEATURES]), w)
+def lightgbm_predict(
+    booster: lgb.Booster, df: pd.DataFrame, w: float, calibrator: dict | None = None
+) -> np.ndarray:
+    return apply_calibration(unweight(booster.predict(df[FEATURES]), w), calibrator)
+
+
+def save_lightgbm(out: Path, booster: lgb.Booster, info: dict) -> None:
+    """lightgbm.txt (best iteration) and calibration.json (class weight + calibrator)."""
+    out.mkdir(parents=True, exist_ok=True)
+    booster.save_model(str(out / "lightgbm.txt"))
+    calibration = {"positive_weight": info["positive_weight"], "calibrator": info["calibrator"]}
+    (out / "calibration.json").write_text(json.dumps(calibration), encoding="utf-8")
+
+
+def load_lightgbm(model_dir: Path) -> tuple[lgb.Booster, float, dict | None]:
+    if not (model_dir / "lightgbm.txt").exists():
+        raise FileNotFoundError(f"{model_dir} has no model; run pipeline.baselines first")
+    cal = json.loads((model_dir / "calibration.json").read_text(encoding="utf-8"))
+    booster = lgb.Booster(model_file=str(model_dir / "lightgbm.txt"))
+    return booster, cal["positive_weight"], cal["calibrator"]
 
 
 # ---- metrics ----------------------------------------------------------------
@@ -205,10 +256,11 @@ def run(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: str = "SNPP")
 
     ratio = fit_ratio(train)
     booster, lgb_info = fit_lightgbm(train, valid_year=last_train)
+    w, cal = lgb_info["positive_weight"], lgb_info["calibrator"]
     preds = {
         "naive": naive_predict(test),
         "ratio": ratio_predict(test, ratio),
-        "lightgbm": lightgbm_predict(booster, test, lgb_info["positive_weight"]),
+        "lightgbm": lightgbm_predict(booster, test, w, cal),
     }
     importance = sorted(
         zip(FEATURES, booster.feature_importance("gain"), strict=True), key=lambda t: -t[1]
@@ -216,8 +268,7 @@ def run(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: str = "SNPP")
     total_gain = sum(g for _, g in importance) or 1.0
 
     out = data_dir / "processed" / region / "models" / satellite
-    out.mkdir(parents=True, exist_ok=True)
-    booster.save_model(str(out / "lightgbm.txt"))
+    save_lightgbm(out, booster, lgb_info)
     (out / "ratio.json").write_text(json.dumps(ratio, indent=2), encoding="utf-8")
     pd.DataFrame(
         {
@@ -235,15 +286,13 @@ def run(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: str = "SNPP")
         "test_years": [int(test["year"].min()), int(test["year"].max())],
         "train_rows": len(train),
         "test_rows": len(test),
-        "lightgbm": lgb_info,
+        "lightgbm": {k: v for k, v in lgb_info.items() if k != "calibrator"},
         "feature_importance_gain_share": {
             f: round(float(g) / total_gain, 4) for f, g in importance
         },
         "train_fit": {
             "ratio": evaluate(train, ratio_predict(train, ratio))["totals"],
-            "lightgbm": evaluate(
-                train, lightgbm_predict(booster, train, lgb_info["positive_weight"])
-            )["totals"],
+            "lightgbm": evaluate(train, lightgbm_predict(booster, train, w, cal))["totals"],
         },
         "test": {name: evaluate(test, p) for name, p in preds.items()},
     }

@@ -72,12 +72,10 @@ def load_training_sample(
     )
 
 
-def _source_model(data_dir: Path, source: str, satellite: str) -> tuple[lgb.Booster, float]:
-    d = data_dir / "processed" / source / "models" / satellite
-    if not (d / "lightgbm.txt").exists():
-        raise FileNotFoundError(f"{d} has no model; run pipeline.baselines {source}")
-    w = json.loads((d / "report.json").read_text(encoding="utf-8"))["lightgbm"]["positive_weight"]
-    return lgb.Booster(model_file=str(d / "lightgbm.txt")), w
+def _source_model(
+    data_dir: Path, source: str, satellite: str
+) -> tuple[lgb.Booster, float, dict | None]:
+    return baselines.load_lightgbm(data_dir / "processed" / source / "models" / satellite)
 
 
 def coverage_by_biome(data_dir: Path, region: str, satellite: str, test_from: int) -> dict:
@@ -125,9 +123,16 @@ def run(
     booster, info = baselines.fit_lightgbm(train, valid_year=last_train, weight="w")
     train_rows, train_biomes = len(train), train["biome"].value_counts().to_dict()
     del train
-    src_booster, src_w = _source_model(data_dir, source, satellite)
+    w, cal = info["positive_weight"], info["calibrator"]
+    src_booster, src_w, src_cal = _source_model(data_dir, source, satellite)
 
-    models = ["naive", "ratio_brazil", "lightgbm_brazil", f"lightgbm_{source}"]
+    models = [
+        "naive",
+        "ratio_brazil",
+        "lightgbm_brazil_uncalibrated",
+        "lightgbm_brazil",
+        f"lightgbm_{source}",
+    ]
     parts: dict[str, list] = {k: [] for k in ["y", "cell_id", "year", "month", "biome", *models]}
     con = duckdb.connect()
     years = [
@@ -151,11 +156,11 @@ def run(
         parts["biome"].append(df["biome"].to_numpy(object))
         parts["naive"].append(baselines.naive_predict(df).astype(np.float32))
         parts["ratio_brazil"].append(baselines.ratio_predict(df, ratio).astype(np.float32))
-        parts["lightgbm_brazil"].append(
-            baselines.lightgbm_predict(booster, df, info["positive_weight"]).astype(np.float32)
-        )
+        raw = baselines.lightgbm_predict(booster, df, w)
+        parts["lightgbm_brazil_uncalibrated"].append(raw.astype(np.float32))
+        parts["lightgbm_brazil"].append(baselines.apply_calibration(raw, cal).astype(np.float32))
         parts[f"lightgbm_{source}"].append(
-            baselines.lightgbm_predict(src_booster, df, src_w).astype(np.float32)
+            baselines.lightgbm_predict(src_booster, df, src_w, src_cal).astype(np.float32)
         )
         del df
     cols = {k: np.concatenate(v) for k, v in parts.items()}
@@ -176,14 +181,13 @@ def run(
                     cols["year"][mask],
                     cols["month"][mask],
                 ).items()
-                if k != "by_year"
+                if k != "by_year" or g == "Brazil"
             }
             for m in models
         }
 
     out = data_dir / "processed" / region / "models" / satellite
-    out.mkdir(parents=True, exist_ok=True)
-    booster.save_model(str(out / "lightgbm.txt"))
+    baselines.save_lightgbm(out, booster, info)
     report = {
         "region": region,
         "satellite": satellite,
@@ -193,7 +197,7 @@ def run(
         "train_rows_sampled": train_rows,
         "train_rows_by_biome": train_biomes,
         "sample_rate_neighbour_only": SAMPLE_RATE,
-        "lightgbm_brazil": info,
+        "lightgbm_brazil": {k: v for k, v in info.items() if k != "calibrator"},
         "coverage": coverage_by_biome(data_dir, region, satellite, years[0]),
         "results": results,
     }

@@ -24,6 +24,18 @@ def test_unweight_undoes_the_class_weight():
     assert baselines.positive_weight(np.array([0, 0, 0, 1])) == 3.0
 
 
+def test_isotonic_calibration_keeps_the_weighted_total():
+    p = np.array([0.1, 0.2, 0.3, 0.6, 0.9])
+    y = np.array([0, 1, 0, 1, 1])
+    w = np.array([5.0, 1.0, 5.0, 1.0, 1.0])
+    cal = baselines.fit_calibration(p, y, w)
+    pc = baselines.apply_calibration(p, cal)
+    assert (w * pc).sum() == pytest.approx((w * y).sum())
+    assert np.all(np.diff(pc) >= 0)  # monotone: ranking is kept
+    assert baselines.apply_calibration(np.array([0.0, 1.0]), cal).tolist() == [pc[0], pc[-1]]
+    assert baselines.apply_calibration(p, None).tolist() == p.tolist()
+
+
 def test_wape():
     assert baselines.wape(pd.Series([2.0, 0.0]), pd.Series([1.0, 1.0])) == pytest.approx(1.0)
     assert baselines.wape(pd.Series([1.0]), pd.Series([0.0])) is None
@@ -55,6 +67,14 @@ def test_lightgbm_fits_with_the_class_weight(report_and_cube, tmp_path):  # noqa
     df = _table(tmp_path, "N20")
     booster, info = baselines.fit_lightgbm(df, valid_year=2022)
     assert info["positive_weight"] == pytest.approx(8.0)
+    assert info["calibrator"] is None  # no 2022 rows to calibrate on
+
+    baselines.save_lightgbm(tmp_path / "m", booster, info)
+    loaded, w, cal = baselines.load_lightgbm(tmp_path / "m")
+    assert (w, cal) == (pytest.approx(8.0), None)
+    assert np.allclose(
+        loaded.predict(df[training.FEATURES]), booster.predict(df[training.FEATURES])
+    )
     raw = booster.predict(df[training.FEATURES])
     p = baselines.lightgbm_predict(booster, df, info["positive_weight"])
     assert np.allclose(p, baselines.unweight(raw, 8.0))

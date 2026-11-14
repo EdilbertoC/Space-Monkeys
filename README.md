@@ -183,53 +183,55 @@ python -m pipeline.baselines pantanal --satellite SNPP
 python -m pipeline.baselines pantanal --satellite N20
 ```
 
-`baselines` predicts, for every row, the probability that MODIS saw fire, and writes `report.json`, `lightgbm.txt`, `ratio.json` and `test_predictions.parquet` to `data/processed/<region>/models/<SAT>/`. Three approaches on the same test years:
+`baselines` predicts, for every row, the probability that MODIS saw fire, and writes `report.json`, `lightgbm.txt`, `calibration.json`, `ratio.json` and `test_predictions.parquet` to `data/processed/<region>/models/<SAT>/`. Three approaches on the same test years:
 
 - **naive:** "VIIRS saw fire, so MODIS would have", i.e. no harmonization;
 - **ratio:** share of MODIS fire in the training years per month, for cells with and without their own VIIRS detection;
-- **LightGBM:** all features, positive class weighted by n_negative / n_positive; the weight multiplies the predicted odds, so they are divided back to keep probabilities (and totals) honest. The last training year is used for early stopping.
+- **LightGBM:** all features, positive class weighted by n_negative / n_positive; the weight multiplies the predicted odds, so they are divided back. The last training year is held out: it drives early stopping and fits an isotonic calibration of the probabilities (which makes that year's total match). The trees are not refit on it, so the calibration never sees training data.
 
-The calendar shows totals, so the main metrics are on totals: bias of the summed probabilities against MODIS fire-days, WAPE of monthly regional totals and of cell-month totals. Pantanal, test years only (MODIS fire-days inside the rows):
+The calendar shows totals, so the main metrics are on totals: bias of the summed probabilities against MODIS fire-days, WAPE of monthly regional totals and of cell-month totals. Pantanal box, test years only (MODIS fire-days inside the rows):
 
 | Satellite, test years | Model | Bias | Monthly WAPE | Cell-month WAPE | ROC AUC | Avg. precision |
 |---|---|---|---|---|---|---|
 | S-NPP, 2018–2026 | naive | +103.8% | 103.8% | 114.3% | 0.890 | 0.361 |
 | | ratio | −13.0% | 20.3% | 75.1% | 0.905 | 0.432 |
-| | **LightGBM** | **+0.1%** | **4.0%** | **48.4%** | **0.951** | **0.730** |
+| | **LightGBM** | **+3.7%** | **5.6%** | **48.9%** | **0.950** | **0.720** |
 | NOAA-20, 2023–2026 | naive | +98.6% | 98.6% | 107.6% | 0.896 | 0.379 |
 | | ratio | −7.7% | 22.6% | 72.6% | 0.910 | 0.457 |
-| | **LightGBM** | **−2.8%** | **4.8%** | **45.5%** | **0.955** | **0.750** |
+| | **LightGBM** | **+0.7%** | **3.8%** | **44.5%** | **0.955** | **0.738** |
 
-Yearly LightGBM totals stay within about ±5% of MODIS in every test year, including 2025–2026, so no strong MODIS drift shows up yet.
+Before calibration (trees refit on every training year, no held-out year) LightGBM scored +0.1% / 4.0% for S-NPP and −2.8% / 4.8% for NOAA-20: in the Pantanal box the uncalibrated model was already close, and a one-year calibration also carries that year's noise. Calibration is kept because it fixes the national model (below). Most of the LightGBM gain comes from the fire radiative power seen by VIIRS (`v_frp_sum`, ~70% of the gain): MODIS misses weak fires, and FRP measures how strong a fire is.
 
 **Outside the Pantanal (national cube, S-NPP, test years 2018–2026, Brazil cells only):**
 
 ```bash
 python -m pipeline.biomes brazil                      # needs data/raw/ibge/Biomas_250mil.zip
 python -m pipeline.training brazil --satellite SNPP   # ~10 min, 69M rows
-python -m pipeline.crossbiome brazil                  # ~17 min
+python -m pipeline.crossbiome brazil                  # ~15 min
 ```
 
 The national training table is too big for memory, so `crossbiome` trains on every row where S-NPP saw fire plus a fixed 1-in-5 sample of the neighbour-only rows (chosen by a hash of cell and date, weighted 5). Test years use every row. Bias and monthly WAPE of the summed probabilities against MODIS fire-days:
 
-| Biome (coverage) | Naive | LightGBM trained on Brazil | LightGBM trained on the Pantanal box |
-|---|---|---|---|
-| Brazil (82%) | +180% / 180% | −7.7% / 8.9% | −28.9% / 29.0% |
-| Amazon (85%) | +166% / 166% | −7.1% / 9.4% | −27.4% / 27.6% |
-| Cerrado (81%) | +157% / 157% | −5.5% / 7.9% | −28.2% / 28.3% |
-| Atlantic Forest (73%) | +293% / 293% | −8.6% / 10.2% | −40.3% / 40.3% |
-| Caatinga (79%) | +246% / 246% | −18.9% / 20.0% | −36.6% / 37.1% |
-| Pampa (70%) | +352% / 352% | −19.7% / 23.6% | −51.9% / 52.2% |
-| Pantanal (91%) | +85% / 85% | +0.9% / 7.8% | +2.9% / 7.2% |
+| Biome (coverage) | Naive | LightGBM Brazil, uncalibrated | **LightGBM Brazil, calibrated** | LightGBM from the Pantanal box |
+|---|---|---|---|---|
+| Brazil (82%) | +180% / 180% | −8.7% / 9.8% | **−0.5% / 6.9%** | −48.2% / 48.2% |
+| Amazon (85%) | +166% / 166% | −8.6% / 10.7% | **−0.6% / 7.3%** | −47.6% / 47.6% |
+| Cerrado (81%) | +157% / 157% | −6.1% / 8.3% | **+2.0% / 7.0%** | −48.4% / 48.4% |
+| Atlantic Forest (73%) | +293% / 293% | −9.9% / 11.1% | **+0.2% / 7.9%** | −50.6% / 50.6% |
+| Caatinga (79%) | +246% / 246% | −19.5% / 20.5% | **−10.8% / 14.3%** | −63.1% / 63.1% |
+| Pampa (70%) | +352% / 352% | −22.6% / 25.3% | **−13.2% / 19.5%** | −57.9% / 58.2% |
+| Pantanal (91%) | +85% / 85% | −0.0% / 7.5% | **+6.3% / 9.3%** | +7.2% / 9.8% |
 
 What this shows:
 
 - **No harmonization is much worse nationally** (+180%) than in the Pantanal (+85%): elsewhere fires are smaller, so VIIRS sees many more that MODIS misses.
-- **A model does not transfer across biomes.** The Pantanal model still ranks cell-days well (ROC AUC 0.85–0.90) but under-predicts every other biome by 27–52%: the same VIIRS signal means a higher chance of a MODIS detection in the Pantanal, where fires are bigger. The harmonization must be trained on the whole country.
-- **The national model under-predicts by 5–20%, and it does so on its training years too** (−5.2% overall, −12.5% on neighbour-only rows), so this is a calibration flaw of the weighted model, not a change in MODIS: for a fixed S-NPP signal (2–3 pixels), P(MODIS) is 0.22–0.26 in every year 2012–2024. Next: calibrate the probabilities on a held-out year.
-- **Possible MODIS drift at the end:** that same P(MODIS) falls to 0.22 in 2025 and 0.18 in 2026 (partial year). To be checked as the record grows.
+- **Calibration fixes the national model.** Uncalibrated, it under-predicted by 8.7%, on its own training years too (−5.2%; −8.1% on the held-out year), so it was a flaw of the weighted model, not a change in MODIS. Calibrated on the held-out year 2017: −0.5% bias, 6.9% monthly error for Brazil, 7–8% in the Amazon, Cerrado and Atlantic Forest.
+- **Still weaker in Caatinga and Pampa** (−11% and −13%, 14–20% monthly error), and the single national calibration now over-predicts the Pantanal biome (+6.3%). Next step: calibrate per biome, on several held-out years instead of one.
+- **A model does not transfer across biomes.** The Pantanal model still ranks cell-days well (ROC AUC 0.83–0.88) but under-predicts every other biome by about half: the same VIIRS signal means a higher chance of a MODIS detection in the Pantanal, where fires are bigger. The harmonization must be trained on the whole country.
+- **The yearly error drifts.** Calibrated national totals go from +6.3% (2018) to −7.1% (2024): about −2 points per year. For a fixed S-NPP signal (2–3 pixels), P(MODIS) rises slightly to 0.26 in 2024 and then falls to 0.22 in 2025 and 0.18 in 2026 (partial year). This matters most for long-term trends: the harmonized trend must carry this uncertainty, and the drift must be checked as the record grows.
 - **Coverage is lowest where fires are small** (Pampa 70%, Atlantic Forest 73%): the gap correction in step 8 matters most there.
-- Cell-month error stays high (61–113%): numbers for small areas need visible uncertainty. Most of the LightGBM gain comes from the fire radiative power seen by VIIRS (`v_frp_sum`, ~70% of the gain): MODIS misses weak fires, and FRP measures how strong a fire is. Next: the U-Net (step 7) must beat these numbers on the same test years to be used.
+- Cell-month error stays high (43% in the Pantanal biome, 62–117% elsewhere): numbers for small areas need visible uncertainty.
+- Next for the model: the U-Net (step 7) must beat these numbers on the same test years to be used.
 
 `data/` is not committed.
 
