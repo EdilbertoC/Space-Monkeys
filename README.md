@@ -79,6 +79,19 @@ The gain in position comes mainly from VIIRS. The main gains from fusion are ear
 
 GOES pixel positions are computed from the GOES-R fixed-grid projection (PUG Vol. 5, section 4.2.8). The real ground size of each pixel is measured from its corners.
 
+## Fire forecast model
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ryangustav/Space-Monkeys/blob/main/notebooks/fire_forecast_base.ipynb)
+
+[`notebooks/fire_forecast_base.ipynb`](notebooks/fire_forecast_base.ipynb) trains the base fire forecast: for every 0.25° cell of Brazil, the probability of at least one fire detection on each of the next 7 days.
+
+- **Data:** NASA FIRMS VIIRS S-NPP yearly archive for Brazil, 2012–2025 (presumed vegetation fires, nominal/high confidence), downloaded inside the notebook.
+- **Model:** small 2D U-Net (~1.9 M parameters). Inputs are image channels: the last 7 days of fire maps, the last 30 days, the climatology of each target day, seasonality and position.
+- **Evaluation:** time-based split (train 2012–2022, validation 2023, test 2024–2025), scored with average precision and Brier score against two references: climatology and persistence.
+- **Output:** `fire_forecast_unet.onnx` + `fire_forecast_meta.json`, run by the backend with ONNX Runtime.
+
+Run it in Colab with a T4 GPU (Runtime → Change runtime type). Edit `notebooks/fire_forecast_base.py`, the reviewable source, then rebuild the notebook with `python notebooks/build_notebooks.py`.
+
 ## Configuration
 
 All settings come from environment variables or `.env`; see [.env.example](.env.example).
@@ -114,6 +127,7 @@ app/
     pulse.py         publish/subscribe for SSE clients
     worker.py        polling loop
   fusion/fuse.py     multi-sensor fusion
+notebooks/          Colab notebooks (fire forecast model)
 tests/
 ```
 
@@ -128,6 +142,7 @@ Every dataset this project reads, with its citation.
 - **VIIRS NOAA-20 (JPSS-1) 375 m active fire, NRT** (`VJ114IMGTDL_NRT`, source `VIIRS_NOAA20_NRT`). NASA VIIRS Land Science Team, NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/FIRMS/VIIRS/VJ114IMGT_NRT.002
 - **VIIRS NOAA-21 (JPSS-2) 375 m active fire, NRT** (`VJ214IMGTDL_NRT`, source `VIIRS_NOAA21_NRT`). NASA VIIRS Land Science Team (2024), NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/VIIRS/VJ214IMG_NRT.002
 - **MODIS Collection 6.1 active fire, NRT** (`MCD14DL`, source `MODIS_NRT`), Terra and Aqua, 1 km. https://doi.org/10.5067/FIRMS/MODIS/MCD14DL.NRT.0061
+- **FIRMS yearly country archive** (VIIRS S-NPP, Brazil, 2012–2025), used to train the forecast model: `https://firms.modaps.eosdis.nasa.gov/data/country/viirs-snpp/{year}/viirs-snpp_{year}_Brazil.csv`
 - FIRMS FAQ (attribute meanings, e.g. `scan`/`track` pixel sizes): https://www.earthdata.nasa.gov/data/tools/firms/faq
 
 We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's Earth Science Data and Information System (ESDIS), with funding provided by NASA Headquarters.
@@ -156,10 +171,13 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 
 | Library | License |
 | --- | --- |
-| FastAPI, Pydantic, pydantic-settings, pytest, Ruff | MIT |
-| Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py | BSD-3-Clause |
-| xarray | Apache-2.0 |
+| FastAPI, Pydantic, pydantic-settings, pytest, Ruff, ONNX Runtime | MIT |
+| Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py, PyTorch, scikit-learn | BSD-3-Clause |
+| xarray, ONNX, onnxscript, Requests | Apache-2.0 |
+| Matplotlib | Matplotlib License (PSF-based) |
 | Python | PSF License |
+
+The forecast notebook runs on Google Colab (hosted Jupyter runtime).
 
 ## NASA Space Apps Challenge 2026 compliance
 
@@ -177,6 +195,6 @@ The team designed the solution: a burning activity calendar from harmonized hots
 SI was used as a coding assistant:
 
 - **Tool:** Claude (Anthropic), a large language model, used through Claude Code.
-- **What it did:** wrote most of the backend code, tests and documentation in this repository from the team's design and instructions, looked up data access details (FIRMS API, GOES file layout, product DOIs), and checked the code against real GOES-19 data.
+- **What it did:** wrote most of the backend code, the forecast notebook, tests and documentation in this repository from the team's design and instructions, looked up data access details (FIRMS API, GOES file layout, product DOIs), and checked the code against real GOES-19 data.
 - **Review:** every SI-assisted file is reviewed and run by the team. Each one starts with the line `# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team.`
 - **Not used for:** data values. All detections come straight from the public NASA and NOAA sources above; nothing is generated or simulated.
