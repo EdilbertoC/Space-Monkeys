@@ -315,11 +315,13 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     report = ingest(args.region, args.data_dir, args.min_confidence_class)
 
-    print(f"{'source':<22}{'first':>12}{'last':>12}{'rows':>11}{'static':>9}{'low':>9}{'kept':>11}")
+    print(
+        f"{'source':<22}{'first':>12}{'last':>12}{'rows':>13}{'static':>11}{'low':>11}{'kept':>13}"
+    )
     for s in report.by_source:
         print(
             f"{s['source']:<22}{s['first_date']!s:>12}{s['last_date']!s:>12}"
-            f"{s['rows']:>11,}{s['static']:>9,}{s['low_confidence']:>9,}{s['kept']:>11,}"
+            f"{s['rows']:>13,}{s['static']:>11,}{s['low_confidence']:>11,}{s['kept']:>13,}"
         )
     print(json.dumps(report.totals, indent=2))
 
