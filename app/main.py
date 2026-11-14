@@ -1,12 +1,15 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import live, system
+from app.api import forecast, live, system
 from app.config import get_settings
+from app.forecast.model import ForecastModel
+from app.forecast.service import ForecastService
 from app.realtime.live import LiveState
 from app.realtime.pulse import PulseBroker
 from app.realtime.worker import RealtimeWorker
@@ -23,9 +26,15 @@ async def lifespan(app: FastAPI):
         fusion_window_hours=settings.fusion_window_hours,
     )
     app.state.broker = PulseBroker()
+    app.state.forecast = None
+    if settings.enable_forecast:
+        model = ForecastModel(Path(settings.forecast_model_dir))
+        app.state.forecast = ForecastService(model, anchor_hours=settings.forecast_anchor_hours)
     app.state.worker = None
     if settings.enable_worker:
-        app.state.worker = RealtimeWorker(settings, app.state.live, app.state.broker)
+        app.state.worker = RealtimeWorker(
+            settings, app.state.live, app.state.broker, forecast=app.state.forecast
+        )
         app.state.worker.start()
     yield
     if app.state.worker:
@@ -39,7 +48,8 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description=(
             "Burning activity calendar backend. Live fire events fused from NOAA GOES-East "
-            "and NASA FIRMS (VIIRS, MODIS) detections, streamed as a pulse over SSE."
+            "and NASA FIRMS (VIIRS, MODIS) detections, streamed as a pulse over SSE, and a "
+            "7-day fire forecast from a U-Net trained on the NASA FIRMS archive."
         ),
         lifespan=lifespan,
     )
@@ -51,6 +61,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(system.router)
     app.include_router(live.router)
+    app.include_router(forecast.router)
     return app
 
 

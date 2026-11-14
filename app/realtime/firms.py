@@ -7,6 +7,7 @@ URL: /api/area/csv/{MAP_KEY}/{SOURCE}/{west,south,east,north}/{DAY_RANGE}
 
 import io
 import logging
+from datetime import date
 
 import httpx
 import pandas as pd
@@ -81,9 +82,13 @@ async def fetch_source(
     source: str,
     bbox: tuple[float, float, float, float],
     day_range: int = 1,
+    start: date | None = None,
 ) -> pd.DataFrame:
+    """Detections for `day_range` days: the most recent ones, or from `start` onward."""
     area = ",".join(f"{v:g}" for v in bbox)
     url = f"{FIRMS_AREA_URL}/{map_key}/{source}/{area}/{day_range}"
+    if start is not None:
+        url += f"/{start.isoformat()}"
     response = await client.get(url, timeout=60)
     response.raise_for_status()
     return parse_csv(response.text, source)

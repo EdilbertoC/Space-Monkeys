@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     fusion_radius_km: float = Field(default=2.0, gt=0)
     fusion_window_hours: float = Field(default=12.0, gt=0)
 
+    # Fire forecast (U-Net, see notebooks/fire_forecast_base.py)
+    enable_forecast: bool = True
+    forecast_model_dir: str = "models/fire_forecast_brazil"
+    forecast_refresh_hours: float = Field(default=6.0, gt=0)
+    forecast_anchor_hours: float = Field(default=12.0, gt=0)
+
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"]

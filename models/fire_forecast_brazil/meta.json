@@ -1,0 +1,69 @@
+{
+  "model": "fire_forecast_brazil",
+  "description": "U-Net forecasting the probability of at least one VIIRS fire detection per 0.25 deg cell of Brazil for each of the next 7 days.",
+  "trained_with": "notebooks/fire_forecast_base.py at commit 2f80945 (REGION brazil, VIIRS only)",
+  "si_assisted": "Training code written with Claude (Anthropic) and reviewed by the Space Monkeys team; the model itself was trained by the team in Google Colab on NASA FIRMS data.",
+  "data": "NASA FIRMS VIIRS S-NPP 375 m yearly archive, Brazil, type 0 (presumed vegetation fire), confidence nominal/high",
+  "train_period": [
+    "2012-02-19",
+    "2022-12-31"
+  ],
+  "validation_period": [
+    "2023-01-01",
+    "2023-12-31"
+  ],
+  "test_period": [
+    "2024-01-01",
+    "2025-12-31"
+  ],
+  "bbox": [
+    -74.0,
+    -34.0,
+    -34.0,
+    6.0
+  ],
+  "resolution_deg": 0.25,
+  "grid": [
+    160,
+    160
+  ],
+  "history_days": 7,
+  "long_window_days": 30,
+  "leads": 7,
+  "inputs": {
+    "counts": "daily fire-pixel counts per cell by UTC acquisition date, uncapped",
+    "channels": [
+      "log1p(count) for days t-6 .. t (7 channels)",
+      "log1p(sum of counts t-29 .. t)",
+      "climatology[day_of_year0(t+k)] for k = 1..7 (climatology.npy)",
+      "sin(2*pi*day_of_year0(t)/365.25)",
+      "cos(2*pi*day_of_year0(t)/365.25)",
+      "forecast mask (mask.npy)",
+      "latitude plane: linspace(1, -1, 160) by row",
+      "longitude plane: linspace(-1, 1, 160) by column"
+    ]
+  },
+  "outputs": "logits for days t+1 .. t+7; probability = sigmoid(logit)",
+  "test_avg_precision": {
+    "climatology": 0.3025,
+    "persistence": 0.1543,
+    "unet": 0.3959
+  },
+  "test_brier": {
+    "climatology": 0.04678,
+    "persistence": 0.04971,
+    "unet": 0.04338
+  },
+  "persistence": {
+    "description": "P(VIIRS fire j days after a VIIRS fire in the same cell), forecast cells, 2012-2022; computed by scripts/persistence_table.py and used by the GOES real-time anchor",
+    "p_fire_after_lag_days_given_fire": {
+      "1": 0.4175,
+      "2": 0.35,
+      "3": 0.3223,
+      "4": 0.3166,
+      "5": 0.3176,
+      "6": 0.3091
+    },
+    "base_rate": 0.0653
+  }
+}

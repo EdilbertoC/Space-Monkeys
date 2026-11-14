@@ -5,12 +5,13 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pandas as pd
 
 from app.config import Settings
+from app.forecast.service import ForecastService
 from app.realtime import detections, firms, goes
 from app.realtime.geojson import feature_collection
 from app.realtime.live import LiveState, PulseDiff
@@ -38,12 +39,20 @@ class WorkerStatus:
 
 
 class RealtimeWorker:
-    def __init__(self, settings: Settings, state: LiveState, broker: PulseBroker) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        state: LiveState,
+        broker: PulseBroker,
+        forecast: ForecastService | None = None,
+    ) -> None:
         self.settings = settings
         self.state = state
         self.broker = broker
+        self.forecast = forecast
         self.status = WorkerStatus()
         self._last_goes_key: str | None = None
+        self._last_forecast: datetime | None = None
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -80,7 +89,36 @@ class RealtimeWorker:
             len(diff.updated),
             len(diff.removed),
         )
+        if self.forecast:
+            await self._update_forecast(client)
         return diff
+
+    async def _update_forecast(self, client: httpx.AsyncClient) -> None:
+        """Refresh the base forecast when due, then re-anchor it on the live fires."""
+        assert self.forecast is not None
+        status = self.status.source("FORECAST")
+        now = datetime.now(UTC)
+        refresh_every = timedelta(hours=self.settings.forecast_refresh_hours)
+        if self._last_forecast is None or now - self._last_forecast >= refresh_every:
+            try:
+                await self.forecast.refresh(client, self.settings.firms_map_key, now)
+                self._last_forecast = now
+                status.last_success, status.last_error = now, None
+            except (httpx.HTTPError, firms.FirmsError, RuntimeError, ValueError) as exc:
+                log.warning("Forecast refresh failed: %s", exc)
+                self.forecast.last_error = status.last_error = str(exc)
+        if self.forecast.current is None:
+            return
+        anchored = self.forecast.apply_anchor(self.state.fires, now)
+        status.last_count = anchored
+        self.broker.publish(
+            "forecast",
+            {
+                "issued_for": self.forecast.current.issued_for.isoformat(),
+                "anchored_at": now.isoformat(),
+                "anchored_cells": anchored,
+            },
+        )
 
     async def _poll_goes(self, client: httpx.AsyncClient) -> pd.DataFrame:
         s = self.settings
