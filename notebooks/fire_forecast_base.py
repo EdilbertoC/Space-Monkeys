@@ -35,8 +35,9 @@
 # compared with *climatology* (what usually happens on this day of the year) and
 # *persistence* (recent fire means more fire).
 #
-# **Runtime:** Runtime → Change runtime type → **T4 GPU** (Brazil). For `"world"` use
-# **High-RAM**; for `"world"` with MODIS prefer an **L4** GPU (~10 GB of data on the GPU).
+# **Runtime:** Runtime → Change runtime type → **T4 GPU**. The daily cubes live on the
+# GPU, not in system RAM: `"world"` puts ~5 GB on the GPU, `"world"` with MODIS ~10 GB
+# (fits a T4's 15 GB; an L4 gives more headroom). System RAM stays low in every mode.
 #
 # **Outputs** (per run tag, e.g. `brazil_modis`): `fire_forecast_<tag>.onnx`,
 # `fire_forecast_<tag>.json`, `climatology_<tag>.npy`, `forecast_mask_<tag>.npy`.
@@ -228,30 +229,35 @@ def grid_year(sensor: str, year: int) -> tuple[np.ndarray, np.ndarray]:
     return counts, brazil
 
 
-# One cube per sensor, each starting on Jan 1 of its first year.
-cubes, offsets, avail = {}, {}, {}
+# One cube per sensor, each starting on Jan 1 of its first year. The cubes are filled
+# year by year straight on the GPU, so the full daily cube never sits in system RAM
+# (the world cube alone is ~4 GB per sensor).
+cubes, offsets, avail, yearly = {}, {}, {}, {}
 for s in ACTIVE:
     first, last = SENSORS[s]["first"], SENSORS[s]["last"]
     offsets[s] = day_index(f"{first}-01-01")
     n_days = day_index(f"{last}-12-31") - offsets[s] + 1
-    cubes[s] = np.zeros((n_days, NY, NX), dtype=np.uint8)
+    cubes[s] = torch.zeros((n_days, NY, NX), dtype=torch.uint8, device=DEVICE)
     if s == "viirs":
         brazil_counts = np.zeros((n_days, EH, EWD), dtype=np.uint8)
+    first_data, yearly[s] = None, {}
     for year in range(first, last + 1):
         t0 = time.time()
         c, b = grid_year(s, year)
         i = day_index(f"{year}-01-01") - offsets[s]
-        cubes[s][i : i + len(c)] = c
+        cubes[s][i : i + len(c)] = torch.from_numpy(c).to(DEVICE)
         if s == "viirs":
             brazil_counts[i : i + len(b)] = b
+        if first_data is None and c.any():
+            first_data = offsets[s] + i + int(np.argmax(c.reshape(len(c), -1).any(1)))
+        yearly[s][year] = int(c.sum(dtype=np.int64))
+        del c, b
         print(f"{s} {year} ready ({time.time() - t0:.0f}s)")
-    has_data = cubes[s].reshape(n_days, -1).any(1)
-    first_data = offsets[s] + int(np.argmax(has_data))
     last_data = offsets[s] + n_days - 1
     avail[s] = (first_data, last_data)
     print(
         f"{s}: {DATES[first_data].date()} to {DATES[last_data].date()}, "
-        f"{cubes[s].nbytes / 1e9:.1f} GB"
+        f"{cubes[s].numel() / 1e9:.1f} GB on {DEVICE}"
     )
 
 V_OFF = offsets["viirs"]
@@ -268,7 +274,7 @@ def sensor_days(s: str, t0: int, t1: int, win=(slice(None), slice(None))) -> np.
     a, b = t0 - offsets[s], t1 - offsets[s]
     lo, hi = max(a, 0), min(b, len(cubes[s]))
     if hi > lo:
-        out[lo - a : hi - a] = cubes[s][lo:hi, ys, xs]
+        out[lo - a : hi - a] = cubes[s][lo:hi, ys, xs].cpu().numpy()
     return out
 
 
@@ -284,16 +290,19 @@ def target_available(s: str, day: int) -> bool:
 
 
 # Forecast mask: cells that burned at least once in the training period (any sensor).
-mask = np.zeros((NY, NX), dtype=bool)
-eval_mask = np.zeros((EH, EWD), dtype=bool)  # Brazil cells scored for every model
-fire_days = np.zeros((NY, NX), dtype=np.int32)
+mask_t = torch.zeros((NY, NX), dtype=torch.bool, device=DEVICE)
+fire_days_t = torch.zeros((NY, NX), dtype=torch.int32, device=DEVICE)
 for s in ACTIVE:
     lo, hi = avail[s][0], min(avail[s][1], train_last)
     for d0 in range(lo, hi + 1, 365):
-        chunk = sensor_days(s, d0, min(d0 + 365, hi + 1)) > 0
-        mask |= chunk.any(0)
+        chunk = cubes[s][d0 - offsets[s] : min(d0 + 365, hi + 1) - offsets[s]] > 0
+        mask_t |= chunk.any(0)
         if s == "viirs":
-            fire_days += chunk.sum(0)
+            fire_days_t += chunk.sum(0, dtype=torch.int32)
+        del chunk
+mask = mask_t.cpu().numpy()
+fire_days = fire_days_t.cpu().numpy()
+eval_mask = np.zeros((EH, EWD), dtype=bool)  # Brazil cells scored for every model
 for d0 in range(avail["viirs"][0], train_last + 1, 365):
     b = brazil_counts[d0 - V_OFF : min(d0 + 365, train_last + 1) - V_OFF]
     eval_mask |= (b > 0).any(0)
@@ -304,12 +313,7 @@ im = ax[0].imshow(np.log1p(fire_days), extent=(W, E, S, N), cmap="inferno")
 ax[0].set_title(f"VIIRS fire days per cell, 2012–2022 (log) — {REGION}")
 plt.colorbar(im, ax=ax[0])
 for s in ACTIVE:
-    lo, hi = avail[s]
-    daily = pd.Series(
-        cubes[s][lo - offsets[s] : hi - offsets[s] + 1].reshape(hi - lo + 1, -1).sum(1),
-        index=DATES[lo : hi + 1],
-    )
-    daily.resample("YS").sum().plot(ax=ax[1], marker="o", label=s.upper())
+    pd.Series(yearly[s]).plot(ax=ax[1], marker="o", label=s.upper())
 ax[1].set_title(f"Detections per year — {REGION} (VIIRS sees far more fires)")
 ax[1].legend()
 plt.tight_layout()
@@ -323,29 +327,33 @@ plt.show()
 
 # %%
 doy = DATES.dayofyear.to_numpy() - 1  # 0..365
-kernel = np.ones(2 * CLIM_HALF_WINDOW + 1, dtype=np.float32) / (2 * CLIM_HALF_WINDOW + 1)
 
 
-def build_climatology(cube: np.ndarray, offset: int) -> np.ndarray:
-    total = np.zeros((366,) + cube.shape[1:], dtype=np.float32)
+def build_climatology(cube: torch.Tensor, offset: int) -> torch.Tensor:
+    """(366, H, W) float16, computed where the cube lives (GPU), with little memory."""
+    total = torch.zeros((366,) + tuple(cube.shape[1:]), dtype=torch.int16, device=cube.device)
     n = np.zeros(366, dtype=np.float32)
     for d in range(avail["viirs"][0], train_last + 1):
-        total[doy[d]] += cube[d - offset] > 0
+        total[doy[d]] += (cube[d - offset] > 0).to(torch.int16)
         n[doy[d]] += 1
-    raw = total / np.maximum(n, 1)[:, None, None]
-    padded = np.concatenate([raw[-CLIM_HALF_WINDOW:], raw, raw[:CLIM_HALF_WINDOW]])
-    out = np.zeros_like(raw)
-    for i, w in enumerate(kernel):
-        out += w * padded[i : i + 366]
+    n = np.maximum(n, 1)
+    out = torch.empty(total.shape, dtype=torch.float16, device=cube.device)
+    width = 2 * CLIM_HALF_WINDOW + 1
+    for i in range(366):
+        acc = torch.zeros(total.shape[1:], dtype=torch.float32, device=cube.device)
+        for j in range(-CLIM_HALF_WINDOW, CLIM_HALF_WINDOW + 1):
+            k = (i + j) % 366
+            acc += total[k].float() / float(n[k])
+        out[i] = (acc / width).half()
     return out
 
 
-climatology = build_climatology(cubes["viirs"], V_OFF)  # model input
+clim_t = build_climatology(cubes["viirs"], V_OFF)  # model input, on the GPU
 if REGION == "brazil":
-    eval_climatology = climatology[:, ER0:ER1, EC0:EC1]
-else:
-    eval_climatology = build_climatology(brazil_counts, V_OFF)  # same in every run
-print("Climatology ready:", climatology.shape)
+    eval_climatology = clim_t[:, ER0:ER1, EC0:EC1].float().cpu().numpy()
+else:  # the same Brazil-only climatology in every run
+    eval_climatology = build_climatology(torch.from_numpy(brazil_counts), V_OFF).float().numpy()
+print("Climatology ready:", tuple(clim_t.shape))
 
 # %% [markdown]
 # ## 4. Features and targets
@@ -387,8 +395,8 @@ def features(t: int, win: tuple[slice, slice] = FULL, hide: tuple[str, ...] = ()
         x[c + HISTORY_DAYS] = np.log1p(window.sum(0))
         x[c + HISTORY_DAYS + 1] = 1.0
     c = PER_SENSOR * len(ACTIVE)
-    for k in range(LEADS):
-        x[c + k] = climatology[doy[t + k + 1], ys, xs]
+    lead_doy = torch.as_tensor(doy[t + 1 : t + 1 + LEADS], device=clim_t.device)
+    x[c : c + LEADS] = clim_t[lead_doy][:, ys, xs].float().cpu().numpy()
     c += LEADS
     angle = 2 * math.pi * doy[t] / 365.25
     x[c], x[c + 1] = math.sin(angle), math.cos(angle)
@@ -526,7 +534,9 @@ with torch.no_grad():
     for i, s in enumerate(ACTIVE):
         lo, hi = avail[s][0], min(avail[s][1], train_last)
         days = np.arange(lo, hi + 1, 20)
-        rate = float(np.mean([(cubes[s][d - offsets[s]][mask] > 0).mean() for d in days]))
+        rate = float(
+            np.mean([(cubes[s][d - offsets[s]][mask_t] > 0).float().mean().item() for d in days])
+        )
         model.head.bias[i * LEADS : (i + 1) * LEADS] = math.log(rate / (1 - rate))
         print(f"{s} training base rate: {rate:.4f}")
 print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
@@ -547,8 +557,8 @@ PATIENCE = 4
 torch.backends.cudnn.benchmark = True
 rng = np.random.default_rng(42)
 
-cubes_g = {s: torch.from_numpy(cubes[s]).to(DEVICE) for s in ACTIVE}  # uint8
-clim_g = torch.from_numpy(climatology).to(DEVICE)
+cubes_g = cubes  # already on the device (uint8)
+clim_g = clim_t  # float16
 doy_g = torch.from_numpy(doy).to(DEVICE)
 static_g = torch.from_numpy(np.stack([mask_plane, lat_plane, lon_plane])).to(DEVICE)
 
@@ -588,7 +598,7 @@ def gpu_features(t: int, ys: slice, xs: slice, hide: tuple[str, ...] = ()) -> to
             torch.log1p(window.sum(0, keepdim=True)),
             torch.ones((1, h, w), device=DEVICE),
         ]
-    parts.append(clim_g[doy_g[t + 1 : t + 1 + LEADS], ys, xs])
+    parts.append(clim_g[doy_g[t + 1 : t + 1 + LEADS]][:, ys, xs].float())
     angle = 2 * math.pi * doy[t] / 365.25
     season = torch.tensor([math.sin(angle), math.cos(angle)], device=DEVICE)
     parts.append(season[:, None, None].expand(-1, h, w))
@@ -792,7 +802,7 @@ torch.onnx.export(
     opset_version=17,
     dynamo=False,
 )
-np.save(OUT_DIR / f"climatology_{TAG}.npy", climatology.astype(np.float16))
+np.save(OUT_DIR / f"climatology_{TAG}.npy", clim_t.cpu().numpy())  # float16
 np.save(OUT_DIR / f"forecast_mask_{TAG}.npy", mask)
 
 channels = []
