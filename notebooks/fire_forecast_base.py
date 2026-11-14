@@ -358,47 +358,93 @@ print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 # %% [markdown]
 # ## 8. Training
 #
-# Random 64×64 crops with random flips and rotations; early stopping on validation
-# average precision.
+# The whole dataset (~1.5 GB) is copied to the GPU once, and every batch is built there,
+# so the GPU never waits for the CPU. Random 64×64 crops with random flips and
+# rotations; early stopping on validation average precision.
 
 # %%
 CROP = 64
-BATCH = 32
+BATCH = 128
 STEPS_PER_EPOCH = 300
 EPOCHS = 20
 PATIENCE = 4
-rng = np.random.default_rng(42)
-mask_t = torch.from_numpy(mask_plane).to(DEVICE)
+torch.backends.cudnn.benchmark = True
+gen = torch.Generator(device=DEVICE).manual_seed(42)
+
+# Dataset on the device.
+_counts = torch.from_numpy(counts.astype(np.int32)).to(DEVICE)
+logc_g = torch.log1p(_counts.float())
+csum_g = torch.cumsum(_counts, dim=0, dtype=torch.int32)
+fire_g = _counts > 0
+del _counts
+clim_g = torch.from_numpy(climatology).to(DEVICE)
+doy_g = torch.from_numpy(doy).to(DEVICE)
+static_g = torch.from_numpy(np.stack([mask_plane, lat_plane, lon_plane])).to(DEVICE)
+train_t_g = torch.from_numpy(TRAIN_T).to(DEVICE)
+hist_offsets = torch.arange(-HISTORY_DAYS + 1, 1, device=DEVICE)
+lead_offsets = torch.arange(1, LEADS + 1, device=DEVICE)
+
+# Top-left corners of crops that are at least 20% forecast cells.
+_cum = np.pad(mask_plane.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+_cover = (
+    _cum[CROP:, CROP:] - _cum[:-CROP, CROP:] - _cum[CROP:, :-CROP] + _cum[:-CROP, :-CROP]
+) / CROP**2
+corners_g = torch.from_numpy(np.argwhere(_cover >= 0.2)).to(DEVICE)
+print(f"Valid crop positions: {len(corners_g):,}")
+
+
+def gpu_features(ts: torch.Tensor) -> torch.Tensor:
+    """Same channels as `features()`, for a batch of days, built on the GPU."""
+    b = ts.shape[0]
+    hist = logc_g[ts[:, None] + hist_offsets]  # B×7×NY×NX
+    recent30 = torch.log1p((csum_g[ts] - csum_g[ts - LONG_WINDOW]).float())[:, None]
+    clim = clim_g[doy_g[ts[:, None] + lead_offsets]]  # B×7×NY×NX
+    angle = 2 * math.pi * doy_g[ts].float() / 365.25
+    season = torch.stack([angle.sin(), angle.cos()], 1)[:, :, None, None].expand(-1, -1, NY, NX)
+    static = static_g.expand(b, -1, -1, -1)
+    return torch.cat([hist, recent30, clim, season, static], dim=1)
 
 
 def random_batch():
-    xs, ys, ms = [], [], []
-    while len(xs) < BATCH:
-        t = int(rng.choice(TRAIN_T))
-        r = int(rng.integers(0, NY - CROP + 1))
-        c = int(rng.integers(0, NX - CROP + 1))
-        m = mask_plane[r : r + CROP, c : c + CROP]
-        if m.mean() < 0.2:
-            continue
-        win = (slice(r, r + CROP), slice(c, c + CROP))
-        x, y = features(t, win), targets(t, win)
-        k = int(rng.integers(0, 4))
-        flip = bool(rng.integers(0, 2))
-        x, y, m = (np.rot90(a, k, axes=(-2, -1)) for a in (x, y, m))
-        if flip:
-            x, y, m = (np.flip(a, axis=-1) for a in (x, y, m))
-        xs.append(np.ascontiguousarray(x))
-        ys.append(np.ascontiguousarray(y))
-        ms.append(np.ascontiguousarray(m))
-    to = lambda a: torch.from_numpy(np.stack(a)).to(DEVICE)  # noqa: E731
-    return to(xs), to(ys), to(ms)
+    ts = train_t_g[torch.randint(len(train_t_g), (BATCH,), device=DEVICE, generator=gen)]
+    corners = corners_g[torch.randint(len(corners_g), (BATCH,), device=DEVICE, generator=gen)]
+    x_full = gpu_features(ts)
+    y_full = fire_g[ts[:, None] + lead_offsets].float()
+    rows, cols = corners[:, 0].tolist(), corners[:, 1].tolist()
+    x = torch.stack(
+        [
+            x_full[i, :, r : r + CROP, c : c + CROP]
+            for i, (r, c) in enumerate(zip(rows, cols, strict=True))
+        ]
+    )
+    y = torch.stack(
+        [
+            y_full[i, :, r : r + CROP, c : c + CROP]
+            for i, (r, c) in enumerate(zip(rows, cols, strict=True))
+        ]
+    )
+    m = x[:, N_CHANNELS - 3]  # the mask channel
+    k = int(torch.randint(4, (1,), generator=gen, device=DEVICE))
+    x, y, m = (torch.rot90(a, k, dims=(-2, -1)) for a in (x, y, m))
+    if torch.rand(1, generator=gen, device=DEVICE).item() < 0.5:
+        x, y, m = (torch.flip(a, dims=(-1,)) for a in (x, y, m))
+    return x.contiguous(), y.contiguous(), m.contiguous()
 
 
 @torch.no_grad()
 def predict_unet(t: int) -> np.ndarray:
     model.eval()
-    x = torch.from_numpy(features(t))[None].to(DEVICE)
-    return torch.sigmoid(model(x))[0].float().cpu().numpy()
+    x = gpu_features(torch.tensor([t], device=DEVICE))
+    with torch.autocast(device_type="cuda", enabled=DEVICE == "cuda"):
+        logits = model(x)
+    return torch.sigmoid(logits.float())[0].cpu().numpy()
+
+
+# The GPU features must match the NumPy ones used later by the backend.
+_t = int(VAL_T[0])
+_diff = np.abs(gpu_features(torch.tensor([_t], device=DEVICE))[0].cpu().numpy() - features(_t))
+assert _diff.max() < 1e-4, _diff.max()
+print("GPU and NumPy features match")
 
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
