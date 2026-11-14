@@ -86,7 +86,8 @@ GOES pixel positions are computed from the GOES-R fixed-grid projection (PUG Vol
 [`notebooks/fire_forecast_base.ipynb`](notebooks/fire_forecast_base.ipynb) trains the base fire forecast: for every 0.25° cell of Brazil, the probability of at least one fire detection on each of the next 7 days.
 
 - **Data:** NASA FIRMS VIIRS S-NPP yearly archive, 2012–2025 (presumed vegetation fires, nominal/high confidence), downloaded inside the notebook.
-- **Two training regions:** `REGION = "brazil"` learns from Brazil only; `REGION = "world"` learns from every country. Both are scored on the same Brazil test (same cells, days and Brazil-only truth), and the last section of the notebook compares them.
+- **Two training regions:** `REGION = "brazil"` learns from Brazil only; `REGION = "world"` learns from every country. Every run is scored on the same Brazil test (same cells, days and Brazil-only VIIRS truth), and the last section of the notebook compares all runs.
+- **Optional MODIS history (`USE_MODIS = True`):** adds MODIS C6.1 2000–2016. VIIRS sees about twice as many fire cell-days as MODIS, so the two are never mixed: each sensor has its own input channels and an "available" flag, and the network has one output head per sensor. The 2012–2016 overlap teaches how they relate, and MODIS inputs are randomly hidden there so the model runs on VIIRS alone from 2017 on and in production.
 - **Model:** small 2D U-Net (~1.9 M parameters). Inputs are image channels: the last 7 days of fire maps, the last 30 days, the climatology of each target day, seasonality and position.
 - **Evaluation:** time-based split (train 2012–2022, validation 2023, test 2024–2025), scored with average precision and Brier score against two references: climatology and persistence.
 - **Output:** `fire_forecast_<region>.onnx` + `fire_forecast_<region>.json`, run by the backend with ONNX Runtime.
@@ -143,7 +144,7 @@ Every dataset this project reads, with its citation.
 - **VIIRS NOAA-20 (JPSS-1) 375 m active fire, NRT** (`VJ114IMGTDL_NRT`, source `VIIRS_NOAA20_NRT`). NASA VIIRS Land Science Team, NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/FIRMS/VIIRS/VJ114IMGT_NRT.002
 - **VIIRS NOAA-21 (JPSS-2) 375 m active fire, NRT** (`VJ214IMGTDL_NRT`, source `VIIRS_NOAA21_NRT`). NASA VIIRS Land Science Team (2024), NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/VIIRS/VJ214IMG_NRT.002
 - **MODIS Collection 6.1 active fire, NRT** (`MCD14DL`, source `MODIS_NRT`), Terra and Aqua, 1 km. https://doi.org/10.5067/FIRMS/MODIS/MCD14DL.NRT.0061
-- **FIRMS yearly country archive** (VIIRS S-NPP, 2012–2025), used to train the forecast model: Brazil `https://firms.modaps.eosdis.nasa.gov/data/country/viirs-snpp/{year}/viirs-snpp_{year}_Brazil.csv` and all countries `https://firms.modaps.eosdis.nasa.gov/data/country/zips/viirs-snpp_{year}_all_countries.zip`
+- **FIRMS yearly country archive**, used to train the forecast model: VIIRS S-NPP 2012–2025 and MODIS C6.1 2000–2016. Brazil `https://firms.modaps.eosdis.nasa.gov/data/country/{viirs-snpp|modis}/{year}/{sensor}_{year}_Brazil.csv` and all countries `https://firms.modaps.eosdis.nasa.gov/data/country/zips/{sensor}_{year}_all_countries.zip`
 - FIRMS FAQ (attribute meanings, e.g. `scan`/`track` pixel sizes): https://www.earthdata.nasa.gov/data/tools/firms/faq
 
 We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's Earth Science Data and Information System (ESDIS), with funding provided by NASA Headquarters.

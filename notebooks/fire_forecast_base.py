@@ -4,39 +4,46 @@
 # Predicts, for every 0.25° cell, the probability of **at least one active fire
 # detection** on each of the next **7 days**, like a weather forecast for fire.
 #
-# Two training regions, same code: set `REGION` in section 1.
+# Choose the training data in section 1, same code for every run:
 #
-# | `REGION` | Learns from | Download |
-# | --- | --- | --- |
-# | `"brazil"` | Brazil only | ~1.3 GB |
-# | `"world"` | every country (Brazil included) | ~5 GB |
+# | Setting | Options |
+# | --- | --- |
+# | `REGION` | `"brazil"` (Brazil only) or `"world"` (every country, Brazil included) |
+# | `USE_MODIS` | `False`: VIIRS 2012–2025. `True`: adds MODIS 2000–2016 as extra history |
 #
-# Both models are **scored on exactly the same test**: Brazil, 2024–2025, the same cells
-# and the same truth (detections inside Brazil). Run the notebook once per region; the
-# last section compares them.
+# Every model is **scored on exactly the same test**: Brazil, 2024–2025, the same cells
+# and the same truth (VIIRS detections inside Brazil). Run the notebook once per setting;
+# the last section compares every run found in the outputs folder.
 #
-# **Data:** NASA FIRMS VIIRS S-NPP 375 m active fire archive, 2012-01-20 to 2025-12-31
-# (yearly files, no key needed). One sensor, so the series is consistent without
-# cross-sensor harmonization. Only `type == 0` (presumed vegetation fire) with nominal or
-# high confidence is used.
+# **Data:** NASA FIRMS active fire archives (yearly files, no key needed):
+# VIIRS S-NPP 375 m (2012-01-20 → 2025-12-31) and, optionally, MODIS Terra/Aqua 1 km
+# Collection 6.1 (2000-11-01 → 2016-12-31). Presumed vegetation fires only (`type == 0`),
+# nominal/high confidence.
 #
-# **Model:** a small 2D U-Net. Input = the last 7 days of fire maps, the last 30 days,
-# the historical climatology of each target day, seasonality and position, stacked as
-# image channels. Output = 7 probability maps (day +1 … +7).
+# **Sensor harmonization with MODIS:** VIIRS sees far more fires than MODIS, so their
+# maps are never mixed. Each sensor has its own input channels plus an "available"
+# flag, and the network has two output heads (fires as VIIRS would see them, and as
+# MODIS would). 2000–2011 trains the MODIS head, 2017–2025 the VIIRS head, and the
+# 2012–2016 overlap teaches the network how the two relate. During the overlap MODIS
+# inputs are randomly hidden, so the model also works with VIIRS alone, which is how it
+# runs from 2017 on and in production (Terra and Aqua are near the end of their life).
 #
-# **Honest evaluation:** split by time (train 2012–2022, validation 2023, test 2024–2025)
-# and compared with two simple references: *climatology* (what usually happens on this
-# day of the year) and *persistence* (recent fire means more fire).
+# **Model:** a small 2D U-Net. Inputs per sensor: the last 7 days of fire maps and the
+# last 30 days; plus the climatology of each target day, seasonality and position.
 #
-# **Runtime:** Runtime → Change runtime type → **T4 GPU**. For `"world"` also enable
-# **High-RAM** (Colab Pro): the global daily cube needs ~4 GB plus working memory.
+# **Honest evaluation:** split by time (train ≤ 2022, validation 2023, test 2024–2025),
+# compared with *climatology* (what usually happens on this day of the year) and
+# *persistence* (recent fire means more fire).
 #
-# **Outputs** (per region): `fire_forecast_<region>.onnx`, `fire_forecast_<region>.json`,
-# `climatology_<region>.npy`, `forecast_mask_<region>.npy`.
+# **Runtime:** Runtime → Change runtime type → **T4 GPU** (Brazil). For `"world"` use
+# **High-RAM**; for `"world"` with MODIS prefer an **L4** GPU (~10 GB of data on the GPU).
+#
+# **Outputs** (per run tag, e.g. `brazil_modis`): `fire_forecast_<tag>.onnx`,
+# `fire_forecast_<tag>.json`, `climatology_<tag>.npy`, `forecast_mask_<tag>.npy`.
 #
 # *SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team.*
-# *Data: NASA FIRMS, VIIRS S-NPP 375 m (doi:10.5067/FIRMS/VIIRS/VNP14IMGT_NRT.002;
-# standard processing archive).*
+# *Data: NASA FIRMS — VIIRS S-NPP 375 m (doi:10.5067/FIRMS/VIIRS/VNP14IMGT_NRT.002) and
+# MODIS C6.1 (doi:10.5067/FIRMS/MODIS/MCD14DL.NRT.0061); standard processing archives.*
 
 # %%
 # Colab already ships numpy, pandas, torch, scikit-learn and matplotlib.
@@ -67,26 +74,36 @@ print("Device:", DEVICE)
 
 # %%
 REGION = "brazil"  # "brazil" or "world"
+USE_MODIS = False  # True: add MODIS 2000–2016 as extra history
 
-FIRST_YEAR, LAST_YEAR = 2012, 2025
-TRAIN_END = "2022-12-31"  # train: 2012-01-20 … 2022-12-31
-VAL_END = "2023-12-31"  # validation: 2023; test: 2024-2025
+TRAIN_END = "2022-12-31"
+VAL_END = "2023-12-31"  # validation: 2023; test: 2024–2025
+LAST_DAY = "2025-12-31"
+
+# Yearly archives per sensor: first year, last year, minimum confidence kept.
+SENSORS = {
+    "viirs": {"first": 2012, "last": 2025},
+    "modis": {"first": 2000, "last": 2016},
+}
+ACTIVE = ["viirs", "modis"] if USE_MODIS else ["viirs"]  # "viirs" is always head 0
+MODIS_DROPOUT = 0.5  # share of overlap samples trained with MODIS hidden
 
 RES = 0.25  # grid resolution, degrees
-# Model grid (west, south, east, north). Both grids share the same 0.25° lattice.
-GRIDS = {
+GRIDS = {  # model grid (west, south, east, north), same 0.25° lattice for both
     "brazil": (-74.0, -34.0, -34.0, 6.0),
     "world": (-180.0, -60.0, 180.0, 80.0),  # no vegetation fires south of 60°S
 }
-EVAL_BBOX = GRIDS["brazil"]  # where both models are scored
+EVAL_BBOX = GRIDS["brazil"]  # where every model is scored
 
-HISTORY_DAYS = 7  # daily fire maps fed to the model
-LONG_WINDOW = 30  # one extra channel: total fires in the last 30 days
+HISTORY_DAYS = 7  # daily fire maps per sensor
+LONG_WINDOW = 30  # one extra channel per sensor: total fires in the last 30 days
 LEADS = 7  # forecast days +1 … +7
 CLIM_HALF_WINDOW = 7  # climatology is smoothed over ±7 days of the year
 
-# Keep downloads, gridded data and outputs in Google Drive between sessions.
-USE_DRIVE = True
+USE_DRIVE = True  # keep downloads, grids and outputs in Google Drive
+
+TAG = REGION + ("_modis" if USE_MODIS else "")
+print("Run tag:", TAG)
 
 # %%
 WORK = Path("work")
@@ -110,7 +127,6 @@ assert REGION in GRIDS, REGION
 W, S, E, N = GRIDS[REGION]
 NX = int(round((E - W) / RES))
 NY = int(round((N - S) / RES))
-# The Brazil evaluation window inside the model grid.
 EW, ES, EE, EN = EVAL_BBOX
 ER0, ER1 = int(round((N - EN) / RES)), int(round((N - ES) / RES))
 EC0, EC1 = int(round((EW - W) / RES)), int(round((EE - W) / RES))
@@ -119,23 +135,28 @@ EH, EWD = ER1 - ER0, EC1 - EC0
 print(f"Model grid: {NY} x {NX} cells. Brazil window: rows {ER0}:{ER1}, cols {EC0}:{EC1}")
 
 # %% [markdown]
-# ## 2. Download and grid the FIRMS archive
+# ## 2. Download and grid the FIRMS archives
 #
-# Each year becomes `counts[day, row, col]` (fire pixels per cell per day, capped at 255)
-# and is cached as a compressed file, so later runs skip the download. Brazil-only
-# detections are also gridded separately: they are the shared test truth.
+# Each sensor-year becomes `counts[day, row, col]` (fire pixels per cell per day, capped
+# at 255), cached as a compressed file so later runs skip the download. Brazil-only VIIRS
+# detections are gridded separately: they are the shared test truth.
 
 # %%
-COUNTRY_URL = (
-    "https://firms.modaps.eosdis.nasa.gov/data/country/viirs-snpp/{y}/viirs-snpp_{y}_Brazil.csv"
-)
-WORLD_URL = (
-    "https://firms.modaps.eosdis.nasa.gov/data/country/zips/viirs-snpp_{y}_all_countries.zip"
-)
+BASE = "https://firms.modaps.eosdis.nasa.gov/data/country"
+URLS = {
+    "brazil": BASE + "/{s}/{y}/{s}_{y}_Brazil.csv",
+    "world": BASE + "/zips/{s}_{y}_all_countries.zip",
+}
+FIRMS_NAME = {"viirs": "viirs-snpp", "modis": "modis"}
 USECOLS = ["latitude", "longitude", "acq_date", "confidence", "type"]
 
-DATES = pd.date_range(f"{FIRST_YEAR}-01-01", f"{LAST_YEAR}-12-31", freq="D")
+YEAR0 = min(SENSORS[s]["first"] for s in ACTIVE)
+DATES = pd.date_range(f"{YEAR0}-01-01", LAST_DAY, freq="D")
 DAY0 = DATES[0]
+
+
+def day_index(date: str | pd.Timestamp) -> int:
+    return int((pd.Timestamp(date) - DAY0).days)
 
 
 def download(url: str, path: Path) -> Path:
@@ -151,9 +172,12 @@ def download(url: str, path: Path) -> Path:
     return path
 
 
-def read_detections(source) -> pd.DataFrame:
-    df = pd.read_csv(source, usecols=USECOLS)
-    return df[(df["type"] == 0) & df["confidence"].isin(["n", "h"])]
+def read_detections(source, sensor: str) -> pd.DataFrame:
+    df = pd.read_csv(source, usecols=USECOLS, dtype={"confidence": str})
+    df = df[df["type"] == 0]
+    if sensor == "viirs":
+        return df[df["confidence"].isin(["n", "h"])]
+    return df[pd.to_numeric(df["confidence"], errors="coerce") >= 30]  # MODIS nominal+
 
 
 def grid_into(target: np.ndarray, df: pd.DataFrame, bbox, year_start: pd.Timestamp) -> int:
@@ -168,9 +192,10 @@ def grid_into(target: np.ndarray, df: pd.DataFrame, bbox, year_start: pd.Timesta
     return int(ok.sum())
 
 
-def grid_year(year: int) -> tuple[np.ndarray, np.ndarray]:
-    """(model-grid counts, Brazil-only counts) for one year, both uint8."""
-    cache = CACHE_DIR / f"{REGION}_{year}.npz"
+def grid_year(sensor: str, year: int) -> tuple[np.ndarray, np.ndarray]:
+    """(model-grid counts, Brazil-only counts) for one sensor-year, both uint8."""
+    name = f"{REGION}_{year}.npz" if sensor == "viirs" else f"{REGION}_{sensor}_{year}.npz"
+    cache = CACHE_DIR / name
     if cache.exists():
         z = np.load(cache)
         return z["counts"], z["brazil"]
@@ -178,75 +203,122 @@ def grid_year(year: int) -> tuple[np.ndarray, np.ndarray]:
     days = 366 if start.is_leap_year else 365
     counts = np.zeros((days, NY, NX), dtype=np.uint16)
     brazil = np.zeros((days, EH, EWD), dtype=np.uint16)
+    url = URLS[REGION].format(s=FIRMS_NAME[sensor], y=year)
+    path = download(url, DATA_DIR / url.rsplit("/", 1)[1])
+    n = 0
     if REGION == "brazil":
-        path = download(COUNTRY_URL.format(y=year), DATA_DIR / f"viirs-snpp_{year}_Brazil.csv")
-        df = read_detections(path)
+        df = read_detections(path, sensor)
         n = grid_into(counts, df, GRIDS[REGION], start)
         grid_into(brazil, df, EVAL_BBOX, start)
     else:
-        path = download(WORLD_URL.format(y=year), DATA_DIR / f"viirs-snpp_{year}_all.zip")
-        n = 0
         with zipfile.ZipFile(path) as zf:
             for member in zf.namelist():
                 if not member.endswith(".csv"):
                     continue
                 with zf.open(member) as fh:
-                    df = read_detections(io.TextIOWrapper(fh, encoding="utf-8"))
+                    df = read_detections(io.TextIOWrapper(fh, encoding="utf-8"), sensor)
                 n += grid_into(counts, df, GRIDS[REGION], start)
                 if member.endswith("_Brazil.csv"):
                     grid_into(brazil, df, EVAL_BBOX, start)
-        path.unlink()  # the gridded cache below replaces the ~370 MB zip
+        path.unlink()  # the gridded cache below replaces the zip
     counts = np.minimum(counts, 255).astype(np.uint8)
     brazil = np.minimum(brazil, 255).astype(np.uint8)
     np.savez_compressed(cache, counts=counts, brazil=brazil)
-    print(f"  {year}: {n:,} detections gridded")
+    print(f"  {sensor} {year}: {n:,} detections gridded")
     return counts, brazil
 
 
-counts = np.zeros((len(DATES), NY, NX), dtype=np.uint8)
-brazil_counts = np.zeros((len(DATES), EH, EWD), dtype=np.uint8)
-for year in range(FIRST_YEAR, LAST_YEAR + 1):
-    t0 = time.time()
-    c, b = grid_year(year)
-    i = (pd.Timestamp(f"{year}-01-01") - DAY0).days
-    counts[i : i + len(c)] = c
-    brazil_counts[i : i + len(b)] = b
-    print(f"{year} ready ({time.time() - t0:.0f}s)")
-del c, b
+# One cube per sensor, each starting on Jan 1 of its first year.
+cubes, offsets, avail = {}, {}, {}
+for s in ACTIVE:
+    first, last = SENSORS[s]["first"], SENSORS[s]["last"]
+    offsets[s] = day_index(f"{first}-01-01")
+    n_days = day_index(f"{last}-12-31") - offsets[s] + 1
+    cubes[s] = np.zeros((n_days, NY, NX), dtype=np.uint8)
+    if s == "viirs":
+        brazil_counts = np.zeros((n_days, EH, EWD), dtype=np.uint8)
+    for year in range(first, last + 1):
+        t0 = time.time()
+        c, b = grid_year(s, year)
+        i = day_index(f"{year}-01-01") - offsets[s]
+        cubes[s][i : i + len(c)] = c
+        if s == "viirs":
+            brazil_counts[i : i + len(b)] = b
+        print(f"{s} {year} ready ({time.time() - t0:.0f}s)")
+    has_data = cubes[s].reshape(n_days, -1).any(1)
+    first_data = offsets[s] + int(np.argmax(has_data))
+    last_data = offsets[s] + n_days - 1
+    avail[s] = (first_data, last_data)
+    print(
+        f"{s}: {DATES[first_data].date()} to {DATES[last_data].date()}, "
+        f"{cubes[s].nbytes / 1e9:.1f} GB"
+    )
 
-first_day = int(np.argmax(brazil_counts.reshape(len(DATES), -1).any(1)))
-train_last = int((pd.Timestamp(TRAIN_END) - DAY0).days)
-print("First day with data:", DATES[first_day].date())
-print(f"Cube: {counts.nbytes / 1e9:.1f} GB")
+V_OFF = offsets["viirs"]
+train_last = day_index(TRAIN_END)
+val_last = day_index(VAL_END)
+
 
 # %%
-# Forecast mask: cells that burned at least once in the training period.
+def sensor_days(s: str, t0: int, t1: int, win=(slice(None), slice(None))) -> np.ndarray:
+    """Days t0..t1-1 of a sensor cube over a window, zeros outside its archive."""
+    ys, xs = win
+    h, w = cubes[s][0, ys, xs].shape
+    out = np.zeros((t1 - t0, h, w), dtype=np.uint8)
+    a, b = t0 - offsets[s], t1 - offsets[s]
+    lo, hi = max(a, 0), min(b, len(cubes[s]))
+    if hi > lo:
+        out[lo - a : hi - a] = cubes[s][lo:hi, ys, xs]
+    return out
+
+
+def input_available(s: str, t: int) -> bool:
+    """A sensor feeds the model on day t only with a full 30-day history."""
+    first, last = avail[s]
+    return first + LONG_WINDOW - 1 <= t <= last
+
+
+def target_available(s: str, day: int) -> bool:
+    first, last = avail[s]
+    return first <= day <= last
+
+
+# Forecast mask: cells that burned at least once in the training period (any sensor).
 mask = np.zeros((NY, NX), dtype=bool)
-eval_mask = np.zeros((EH, EWD), dtype=bool)  # Brazil cells scored for both models
-for d0 in range(first_day, train_last + 1, 365):
-    d1 = min(d0 + 365, train_last + 1)
-    mask |= (counts[d0:d1] > 0).any(0)
-    eval_mask |= (brazil_counts[d0:d1] > 0).any(0)
+eval_mask = np.zeros((EH, EWD), dtype=bool)  # Brazil cells scored for every model
+fire_days = np.zeros((NY, NX), dtype=np.int32)
+for s in ACTIVE:
+    lo, hi = avail[s][0], min(avail[s][1], train_last)
+    for d0 in range(lo, hi + 1, 365):
+        chunk = sensor_days(s, d0, min(d0 + 365, hi + 1)) > 0
+        mask |= chunk.any(0)
+        if s == "viirs":
+            fire_days += chunk.sum(0)
+for d0 in range(avail["viirs"][0], train_last + 1, 365):
+    b = brazil_counts[d0 - V_OFF : min(d0 + 365, train_last + 1) - V_OFF]
+    eval_mask |= (b > 0).any(0)
 print(f"Forecast cells: {mask.sum():,}; Brazil test cells: {eval_mask.sum():,}")
 
 fig, ax = plt.subplots(1, 2, figsize=(14, 5))
-fire_days = np.zeros((NY, NX), dtype=np.int32)
-for d0 in range(first_day, train_last + 1, 365):
-    fire_days += (counts[d0 : min(d0 + 365, train_last + 1)] > 0).sum(0)
 im = ax[0].imshow(np.log1p(fire_days), extent=(W, E, S, N), cmap="inferno")
-ax[0].set_title(f"Fire days per cell, 2012–2022 (log) — {REGION}")
+ax[0].set_title(f"VIIRS fire days per cell, 2012–2022 (log) — {REGION}")
 plt.colorbar(im, ax=ax[0])
-daily = pd.Series(brazil_counts.reshape(len(DATES), -1).sum(1), index=DATES)
-daily.groupby(daily.index.dayofyear).mean().plot(ax=ax[1])
-ax[1].set_title("Brazil: mean detections per day of year")
-ax[1].set_xlabel("Day of year")
+for s in ACTIVE:
+    lo, hi = avail[s]
+    daily = pd.Series(
+        cubes[s][lo - offsets[s] : hi - offsets[s] + 1].reshape(hi - lo + 1, -1).sum(1),
+        index=DATES[lo : hi + 1],
+    )
+    daily.resample("YS").sum().plot(ax=ax[1], marker="o", label=s.upper())
+ax[1].set_title(f"Detections per year — {REGION} (VIIRS sees far more fires)")
+ax[1].legend()
 plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## 3. Climatology (training years only)
+# ## 3. Climatology (VIIRS training years only)
 #
-# For each cell and day of year: the share of training years with a fire that day,
+# For each cell and day of year: the share of training years with a VIIRS fire that day,
 # smoothed over ±7 days. It is an input channel and the first reference model.
 
 # %%
@@ -254,11 +326,11 @@ doy = DATES.dayofyear.to_numpy() - 1  # 0..365
 kernel = np.ones(2 * CLIM_HALF_WINDOW + 1, dtype=np.float32) / (2 * CLIM_HALF_WINDOW + 1)
 
 
-def build_climatology(cube: np.ndarray) -> np.ndarray:
+def build_climatology(cube: np.ndarray, offset: int) -> np.ndarray:
     total = np.zeros((366,) + cube.shape[1:], dtype=np.float32)
     n = np.zeros(366, dtype=np.float32)
-    for d in range(first_day, train_last + 1):
-        total[doy[d]] += cube[d] > 0
+    for d in range(avail["viirs"][0], train_last + 1):
+        total[doy[d]] += cube[d - offset] > 0
         n[doy[d]] += 1
     raw = total / np.maximum(n, 1)[:, None, None]
     padded = np.concatenate([raw[-CLIM_HALF_WINDOW:], raw, raw[:CLIM_HALF_WINDOW]])
@@ -268,10 +340,11 @@ def build_climatology(cube: np.ndarray) -> np.ndarray:
     return out
 
 
-climatology = build_climatology(counts)  # model input
-eval_climatology = (
-    climatology[:, ER0:ER1, EC0:EC1] if REGION == "brazil" else (build_climatology(brazil_counts))
-)  # reference model, identical in both runs
+climatology = build_climatology(cubes["viirs"], V_OFF)  # model input
+if REGION == "brazil":
+    eval_climatology = climatology[:, ER0:ER1, EC0:EC1]
+else:
+    eval_climatology = build_climatology(brazil_counts, V_OFF)  # same in every run
 print("Climatology ready:", climatology.shape)
 
 # %% [markdown]
@@ -281,32 +354,39 @@ print("Climatology ready:", climatology.shape)
 #
 # | Channels | Content |
 # | --- | --- |
-# | 7 | log(1 + fire count) for days t-6 … t |
-# | 1 | log(1 + total fires in the last 30 days) |
-# | 7 | climatology for target days t+1 … t+7 |
+# | 9 per sensor | log(1 + count) for days t-6 … t, log(1 + total of last 30 days), available flag |
+# | 7 | VIIRS climatology for target days t+1 … t+7 |
 # | 2 | sin/cos of day of year |
 # | 3 | forecast mask, latitude/90, longitude/180 |
 #
-# Targets: fire (yes/no) on days t+1 … t+7. Scoring always uses Brazil-only detections.
+# Outputs: 7 maps per sensor (VIIRS first). Scoring always uses the VIIRS head and
+# Brazil-only VIIRS detections.
 
 # %%
-N_CHANNELS = HISTORY_DAYS + 1 + LEADS + 2 + 3
+PER_SENSOR = HISTORY_DAYS + 2
+N_CHANNELS = PER_SENSOR * len(ACTIVE) + LEADS + 2 + 3
+N_OUT = LEADS * len(ACTIVE)
+MASK_CH = N_CHANNELS - 3
 lat_plane = np.repeat(((N - RES / 2 - np.arange(NY) * RES) / 90).astype(np.float32)[:, None], NX, 1)
 lon_plane = np.repeat(((W + RES / 2 + np.arange(NX) * RES) / 180).astype(np.float32)[None], NY, 0)
 mask_plane = mask.astype(np.float32)
 FULL = (slice(None), slice(None))
 
 
-def features(t: int, win: tuple[slice, slice] = FULL) -> np.ndarray:
+def features(t: int, win: tuple[slice, slice] = FULL, hide: tuple[str, ...] = ()) -> np.ndarray:
     """Input channels for a forecast issued at the end of day t (optionally a window)."""
     ys, xs = win
     h, w = mask_plane[ys, xs].shape
-    x = np.empty((N_CHANNELS, h, w), dtype=np.float32)
-    hist = counts[t - HISTORY_DAYS + 1 : t + 1, ys, xs].astype(np.float32)
-    x[:HISTORY_DAYS] = np.log1p(hist)  # float32: log1p on uint8 would give float16
-    recent30 = counts[t - LONG_WINDOW + 1 : t + 1, ys, xs].sum(0, dtype=np.float32)
-    x[HISTORY_DAYS] = np.log1p(recent30)
-    c = HISTORY_DAYS + 1
+    x = np.zeros((N_CHANNELS, h, w), dtype=np.float32)
+    for i, s in enumerate(ACTIVE):
+        c = i * PER_SENSOR
+        if s in hide or not input_available(s, t):
+            continue  # channels and flag stay 0
+        window = sensor_days(s, t - LONG_WINDOW + 1, t + 1, win).astype(np.float32)
+        x[c : c + HISTORY_DAYS] = np.log1p(window[-HISTORY_DAYS:])
+        x[c + HISTORY_DAYS] = np.log1p(window.sum(0))
+        x[c + HISTORY_DAYS + 1] = 1.0
+    c = PER_SENSOR * len(ACTIVE)
     for k in range(LEADS):
         x[c + k] = climatology[doy[t + k + 1], ys, xs]
     c += LEADS
@@ -317,37 +397,40 @@ def features(t: int, win: tuple[slice, slice] = FULL) -> np.ndarray:
 
 
 def eval_targets(t: int) -> np.ndarray:
-    """Brazil-only truth for days t+1 … t+7 (the shared test truth)."""
-    return (brazil_counts[t + 1 : t + 1 + LEADS] > 0).astype(np.float32)
+    """Brazil-only VIIRS truth for days t+1 … t+7 (the shared test truth)."""
+    return (brazil_counts[t + 1 - V_OFF : t + 1 + LEADS - V_OFF] > 0).astype(np.float32)
 
 
-start = first_day + LONG_WINDOW
-val_last = int((pd.Timestamp(VAL_END) - DAY0).days)
-end = len(DATES) - LEADS - 1
-TRAIN_T = np.arange(start, train_last - LEADS + 1)
+first_t = min(avail[s][0] for s in ACTIVE) + LONG_WINDOW - 1
+TRAIN_T = np.arange(first_t, train_last - LEADS + 1)
 VAL_T = np.arange(train_last + 1, val_last - LEADS + 1)
-TEST_T = np.arange(val_last + 1, end + 1)
-print(f"Forecast days — train {len(TRAIN_T)}, val {len(VAL_T)}, test {len(TEST_T)}")
+TEST_T = np.arange(val_last + 1, len(DATES) - LEADS)
+print(
+    f"Forecast days — train {len(TRAIN_T)} (from {DATES[first_t].date()}), "
+    f"val {len(VAL_T)}, test {len(TEST_T)}"
+)
 
 # %% [markdown]
-# ## 5. Reference models (Brazil, identical in both runs)
+# ## 5. Reference models (Brazil, identical in every run)
 #
 # * **Climatology:** probability = climatology of the target day.
-# * **Persistence:** probability learned on training data from whether the cell burned
-#   in the last 3 days, per lead day.
+# * **Persistence:** probability learned on VIIRS training data from whether the cell
+#   burned in the last 3 days, per lead day.
 
 
 # %%
 def eval_recent(t: int) -> np.ndarray:
-    return (brazil_counts[t - 2 : t + 1] > 0).any(0)
+    return (brazil_counts[t - 2 - V_OFF : t + 1 - V_OFF] > 0).any(0)
 
 
+viirs_start = avail["viirs"][0] + LONG_WINDOW
+viirs_train_t = np.arange(max(first_t, viirs_start), train_last - LEADS + 1)
 persist_p = np.zeros((LEADS, 2), dtype=np.float32)  # [lead, recent fire?]
 for k in range(LEADS):
     rs, ys_ = [], []
-    for t in TRAIN_T[::5]:
+    for t in viirs_train_t[::5]:
         rs.append(eval_recent(t)[eval_mask])
-        ys_.append(brazil_counts[t + k + 1][eval_mask] > 0)
+        ys_.append(brazil_counts[t + k + 1 - V_OFF][eval_mask] > 0)
     r, y = np.concatenate(rs), np.concatenate(ys_)
     persist_p[k] = [y[~r].mean(), y[r].mean()]
 print("Per lead day: [P(fire | no recent fire), P(fire | recent fire)]\n", persist_p.round(3))
@@ -363,10 +446,7 @@ def predict_persistence(t: int) -> np.ndarray:
 
 
 def evaluate(predict, days: np.ndarray, step: int = 2) -> pd.DataFrame:
-    """Average precision and Brier score per lead day, over the Brazil test cells.
-
-    `predict(t)` returns 7 maps over the Brazil window.
-    """
+    """Average precision and Brier score per lead day, over the Brazil test cells."""
     preds = [[] for _ in range(LEADS)]
     truth = [[] for _ in range(LEADS)]
     for t in days[::step]:
@@ -395,7 +475,8 @@ for name, fn in [("climatology", predict_climatology), ("persistence", predict_p
 # ## 6. U-Net
 #
 # Plain binary cross-entropy keeps the probabilities calibrated (a 30% forecast should
-# come true about 30% of the time). Cells outside the forecast mask are ignored.
+# come true about 30% of the time). Cells outside the forecast mask, and target days a
+# sensor did not observe, are ignored.
 
 
 # %%
@@ -436,23 +517,26 @@ class UNet(nn.Module):
         x = self.mid(x)
         for up, dec, skip in zip(self.up, self.dec, reversed(skips), strict=True):
             x = dec(torch.cat([up(x), skip], dim=1))
-        return self.head(x)  # logits
+        return self.head(x)  # logits: LEADS maps per sensor, VIIRS first
 
 
-model = UNet(N_CHANNELS, LEADS).to(DEVICE)
-# Start from the training base rate so the first predictions are already sensible.
-base_rate = float(np.mean([(counts[t + 1][mask] > 0).mean() for t in TRAIN_T[::20]]))
+model = UNet(N_CHANNELS, N_OUT).to(DEVICE)
+# Start each head from its sensor's training base rate.
 with torch.no_grad():
-    model.head.bias.fill_(math.log(base_rate / (1 - base_rate)))
-print(f"Training base rate: {base_rate:.4f}")
+    for i, s in enumerate(ACTIVE):
+        lo, hi = avail[s][0], min(avail[s][1], train_last)
+        days = np.arange(lo, hi + 1, 20)
+        rate = float(np.mean([(cubes[s][d - offsets[s]][mask] > 0).mean() for d in days]))
+        model.head.bias[i * LEADS : (i + 1) * LEADS] = math.log(rate / (1 - rate))
+        print(f"{s} training base rate: {rate:.4f}")
 print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
 # %% [markdown]
 # ## 7. Training
 #
-# The daily cube is copied to the GPU once and every batch is built there, so the GPU
-# never waits for the CPU. Random 64×64 crops with random flips and rotations; early
-# stopping on Brazil validation average precision (the same rule for both regions).
+# The cubes are copied to the GPU once and every batch is built there, so the GPU never
+# waits for the CPU. Random 64×64 crops with random flips and rotations; early stopping
+# on Brazil validation average precision of the VIIRS head (same rule for every run).
 
 # %%
 CROP = 64
@@ -461,51 +545,87 @@ STEPS_PER_EPOCH = 300
 EPOCHS = 20
 PATIENCE = 4
 torch.backends.cudnn.benchmark = True
-gen = torch.Generator(device=DEVICE).manual_seed(42)
+rng = np.random.default_rng(42)
 
-counts_g = torch.from_numpy(counts).to(DEVICE)  # uint8
+cubes_g = {s: torch.from_numpy(cubes[s]).to(DEVICE) for s in ACTIVE}  # uint8
 clim_g = torch.from_numpy(climatology).to(DEVICE)
 doy_g = torch.from_numpy(doy).to(DEVICE)
 static_g = torch.from_numpy(np.stack([mask_plane, lat_plane, lon_plane])).to(DEVICE)
-train_t_g = torch.from_numpy(TRAIN_T).to(DEVICE)
 
 # Top-left corners of crops that are at least 20% forecast cells.
 _cum = np.pad(mask_plane.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
 _cover = (
     _cum[CROP:, CROP:] - _cum[:-CROP, CROP:] - _cum[CROP:, :-CROP] + _cum[:-CROP, :-CROP]
 ) / CROP**2
-corners_g = torch.from_numpy(np.argwhere(_cover >= 0.2)).to(DEVICE)
-print(f"Valid crop positions: {len(corners_g):,}")
+corners = np.argwhere(_cover >= 0.2)
+print(f"Valid crop positions: {len(corners):,}")
 
 
-def gpu_features(t: int, ys: slice, xs: slice) -> torch.Tensor:
+def gpu_days(s: str, t0: int, t1: int, ys: slice, xs: slice) -> torch.Tensor:
+    """GPU twin of `sensor_days`."""
+    h = len(range(*ys.indices(NY)))
+    w = len(range(*xs.indices(NX)))
+    out = torch.zeros((t1 - t0, h, w), dtype=torch.uint8, device=DEVICE)
+    a, b = t0 - offsets[s], t1 - offsets[s]
+    lo, hi = max(a, 0), min(b, len(cubes[s]))
+    if hi > lo:
+        out[lo - a : hi - a] = cubes_g[s][lo:hi, ys, xs]
+    return out
+
+
+def gpu_features(t: int, ys: slice, xs: slice, hide: tuple[str, ...] = ()) -> torch.Tensor:
     """Same channels as `features()`, for one day and window, built on the GPU."""
-    window = counts_g[t - LONG_WINDOW + 1 : t + 1, ys, xs].float()
-    hist = torch.log1p(window[-HISTORY_DAYS:])
-    recent30 = torch.log1p(window.sum(0, keepdim=True))
-    clim = clim_g[doy_g[t + 1 : t + 1 + LEADS], ys, xs]
-    h, w = hist.shape[-2:]
+    h = len(range(*ys.indices(NY)))
+    w = len(range(*xs.indices(NX)))
+    parts = []
+    for s in ACTIVE:
+        if s in hide or not input_available(s, t):
+            parts.append(torch.zeros((PER_SENSOR, h, w), device=DEVICE))
+            continue
+        window = gpu_days(s, t - LONG_WINDOW + 1, t + 1, ys, xs).float()
+        parts += [
+            torch.log1p(window[-HISTORY_DAYS:]),
+            torch.log1p(window.sum(0, keepdim=True)),
+            torch.ones((1, h, w), device=DEVICE),
+        ]
+    parts.append(clim_g[doy_g[t + 1 : t + 1 + LEADS], ys, xs])
     angle = 2 * math.pi * doy[t] / 365.25
     season = torch.tensor([math.sin(angle), math.cos(angle)], device=DEVICE)
-    season = season[:, None, None].expand(-1, h, w)
-    return torch.cat([hist, recent30, clim, season, static_g[:, ys, xs]], dim=0)
+    parts.append(season[:, None, None].expand(-1, h, w))
+    parts.append(static_g[:, ys, xs])
+    return torch.cat(parts, dim=0)
+
+
+def gpu_targets(t: int, ys: slice, xs: slice) -> tuple[torch.Tensor, torch.Tensor]:
+    """Targets for every head and a per-channel weight (0 where a sensor saw nothing)."""
+    ys_, ws = [], []
+    for s in ACTIVE:
+        ys_.append(gpu_days(s, t + 1, t + 1 + LEADS, ys, xs) > 0)
+        ok = [target_available(s, t + 1 + k) for k in range(LEADS)]
+        ws.append(torch.tensor(ok, dtype=torch.float32, device=DEVICE))
+    return torch.cat(ys_).float(), torch.cat(ws)
 
 
 def random_batch():
-    ts = train_t_g[torch.randint(len(train_t_g), (BATCH,), device=DEVICE, generator=gen)]
-    corners = corners_g[torch.randint(len(corners_g), (BATCH,), device=DEVICE, generator=gen)]
-    xs, ys = [], []
-    for t, (r, c) in zip(ts.tolist(), corners.tolist(), strict=True):
+    ts = rng.choice(TRAIN_T, BATCH)
+    picks = corners[rng.integers(len(corners), size=BATCH)]
+    xs, ys, ws = [], [], []
+    for t, (r, c) in zip(ts.tolist(), picks.tolist(), strict=True):
         win = (slice(r, r + CROP), slice(c, c + CROP))
-        xs.append(gpu_features(t, *win))
-        ys.append(counts_g[t + 1 : t + 1 + LEADS, win[0], win[1]] > 0)
-    x, y = torch.stack(xs), torch.stack(ys).float()
-    m = x[:, N_CHANNELS - 3]  # the mask channel
-    k = int(torch.randint(4, (1,), generator=gen, device=DEVICE))
+        hide = ()
+        if USE_MODIS and input_available("viirs", t) and rng.random() < MODIS_DROPOUT:
+            hide = ("modis",)  # learn to work without MODIS during the overlap
+        xs.append(gpu_features(t, *win, hide=hide))
+        y, w = gpu_targets(t, *win)
+        ys.append(y)
+        ws.append(w)
+    x, y, w = torch.stack(xs), torch.stack(ys), torch.stack(ws)
+    m = x[:, MASK_CH]
+    k = int(rng.integers(4))
     x, y, m = (torch.rot90(a, k, dims=(-2, -1)) for a in (x, y, m))
-    if torch.rand(1, generator=gen, device=DEVICE).item() < 0.5:
+    if rng.random() < 0.5:
         x, y, m = (torch.flip(a, dims=(-1,)) for a in (x, y, m))
-    return x.contiguous(), y.contiguous(), m.contiguous()
+    return x.contiguous(), y.contiguous(), m.contiguous(), w
 
 
 # The model sees a margin around Brazil when predicting it (context across borders).
@@ -519,19 +639,19 @@ assert PR1 >= ER1 and PC1 >= EC1
 
 @torch.no_grad()
 def predict_unet(t: int) -> np.ndarray:
-    """7 probability maps over the Brazil window."""
+    """VIIRS-head probability maps (7) over the Brazil window."""
     model.eval()
     x = gpu_features(t, slice(PR0, PR1), slice(PC0, PC1))[None]
     with torch.autocast(device_type="cuda", enabled=DEVICE == "cuda"):
         logits = model(x)
-    p = torch.sigmoid(logits.float())[0]
+    p = torch.sigmoid(logits[:, :LEADS].float())[0]
     return p[:, ER0 - PR0 : ER1 - PR0, EC0 - PC0 : EC1 - PC0].cpu().numpy()
 
 
 # The GPU features must match the NumPy ones used later by the backend.
-_t = int(VAL_T[0])
-_gpu = gpu_features(_t, *EVAL_WIN).cpu().numpy()
-assert np.abs(_gpu - features(_t, EVAL_WIN)).max() < 1e-4
+for _t in [int(VAL_T[0])] + ([int(TRAIN_T[0])] if USE_MODIS else []):
+    _gpu = gpu_features(_t, *EVAL_WIN).cpu().numpy()
+    assert np.abs(_gpu - features(_t, EVAL_WIN)).max() < 1e-4, _t
 print("GPU and NumPy features match")
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
@@ -546,11 +666,12 @@ for epoch in range(1, EPOCHS + 1):
     model.train()
     t0, total = time.time(), 0.0
     for _ in range(STEPS_PER_EPOCH):
-        x, y, m = random_batch()
+        x, y, m, w = random_batch()
         with torch.autocast(device_type="cuda", enabled=use_amp):
             logits = model(x)
         loss = F.binary_cross_entropy_with_logits(logits.float(), y, reduction="none")
-        loss = (loss * m[:, None]).sum() / (m.sum() * LEADS)
+        weight = m[:, None] * w[:, :, None, None]
+        loss = (loss * weight).sum() / weight.sum().clamp(min=1.0)
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -574,7 +695,7 @@ for epoch in range(1, EPOCHS + 1):
             break
 
 model.load_state_dict(best_state)
-torch.save(best_state, OUT_DIR / f"fire_forecast_{REGION}.pt")
+torch.save(best_state, OUT_DIR / f"fire_forecast_{TAG}.pt")
 
 # %% [markdown]
 # ## 8. Test results — Brazil, 2024–2025 (never seen in training)
@@ -583,7 +704,7 @@ torch.save(best_state, OUT_DIR / f"fire_forecast_{REGION}.pt")
 results = {
     "climatology": evaluate(predict_climatology, TEST_T),
     "persistence": evaluate(predict_persistence, TEST_T),
-    f"unet_{REGION}": evaluate(predict_unet, TEST_T),
+    f"unet_{TAG}": evaluate(predict_unet, TEST_T),
 }
 summary = pd.concat({name: t["avg_precision"] for name, t in results.items()}, axis=1)
 brier = pd.concat({name: t["brier"] for name, t in results.items()}, axis=1)
@@ -598,10 +719,12 @@ for a in ax:
 plt.tight_layout()
 plt.show()
 
-(OUT_DIR / f"test_results_{REGION}.json").write_text(
+(OUT_DIR / f"test_results_{TAG}.json").write_text(
     json.dumps(
         {
+            "tag": TAG,
             "region": REGION,
+            "sensors": ACTIVE,
             "epochs_trained": len(history),
             "history": history,
             "avg_precision": summary.round(5).to_dict(),
@@ -622,7 +745,7 @@ bins = np.linspace(0, 1, 11)
 idx = np.clip(np.digitize(p_all, bins) - 1, 0, 9)
 observed = [y_all[idx == i].mean() if (idx == i).any() else np.nan for i in range(10)]
 plt.plot([0, 1], [0, 1], "k--", label="perfect")
-plt.plot((bins[:-1] + bins[1:]) / 2, observed, "o-", label=f"U-Net ({REGION}), day +1")
+plt.plot((bins[:-1] + bins[1:]) / 2, observed, "o-", label=f"U-Net ({TAG}), day +1")
 plt.xlabel("Forecast probability")
 plt.ylabel("Observed frequency")
 plt.legend()
@@ -631,17 +754,18 @@ plt.show()
 
 # %%
 # One example forecast during the 2024 dry season.
-t = int((pd.Timestamp("2024-08-20") - DAY0).days)
+t = day_index("2024-08-20")
 pred = predict_unet(t)
 extent = (EW, EE, ES, EN)
 fig, ax = plt.subplots(2, 4, figsize=(16, 7))
-ax[0, 0].imshow(np.log1p(brazil_counts[t - 6 : t + 1].sum(0)), cmap="inferno", extent=extent)
+last7 = brazil_counts[t - 6 - V_OFF : t + 1 - V_OFF].sum(0)
+ax[0, 0].imshow(np.log1p(last7), cmap="inferno", extent=extent)
 ax[0, 0].set_title(f"Last 7 days of fires\n(up to {DATES[t].date()})")
 for i, k in enumerate([0, 2, 6]):
     shown = np.where(eval_mask, pred[k], np.nan)
     ax[0, i + 1].imshow(shown, cmap="YlOrRd", vmin=0, vmax=1, extent=extent)
-    ax[0, i + 1].set_title(f"Forecast day +{k + 1} ({REGION} model)")
-    ax[1, i + 1].imshow(brazil_counts[t + k + 1] > 0, cmap="gray_r", extent=extent)
+    ax[0, i + 1].set_title(f"Forecast day +{k + 1} ({TAG})")
+    ax[1, i + 1].imshow(brazil_counts[t + k + 1 - V_OFF] > 0, cmap="gray_r", extent=extent)
     ax[1, i + 1].set_title(f"Observed {DATES[t + k + 1].date()}")
 ax[1, 0].axis("off")
 plt.tight_layout()
@@ -651,12 +775,13 @@ plt.show()
 # ## 9. Export for the backend
 #
 # The network is fully convolutional, so the ONNX file accepts any window whose height
-# and width are multiples of 8.
+# and width are multiples of 8. Use the first 7 output channels (VIIRS head); in
+# production the MODIS input channels and flag stay 0.
 
 # %%
 model.eval().cpu()
 dummy = torch.from_numpy(features(int(TEST_T[0]), EVAL_WIN))[None]
-onnx_path = OUT_DIR / f"fire_forecast_{REGION}.onnx"
+onnx_path = OUT_DIR / f"fire_forecast_{TAG}.onnx"
 torch.onnx.export(
     model,
     dummy,
@@ -667,29 +792,37 @@ torch.onnx.export(
     opset_version=17,
     dynamo=False,
 )
-np.save(OUT_DIR / f"climatology_{REGION}.npy", climatology.astype(np.float16))
-np.save(OUT_DIR / f"forecast_mask_{REGION}.npy", mask)
+np.save(OUT_DIR / f"climatology_{TAG}.npy", climatology.astype(np.float16))
+np.save(OUT_DIR / f"forecast_mask_{TAG}.npy", mask)
 
+channels = []
+for s in ACTIVE:
+    channels += [f"{s}_log1p_count_t-{HISTORY_DAYS - 1 - i}" for i in range(HISTORY_DAYS)]
+    channels += [f"{s}_log1p_sum_30d", f"{s}_available"]
+channels += [f"climatology_t+{k + 1}" for k in range(LEADS)]
+channels += ["doy_sin", "doy_cos", "mask", "lat_over_90", "lon_over_180"]
 meta = {
-    "model": f"fire_forecast_{REGION}",
-    "data": "NASA FIRMS VIIRS S-NPP 375 m, type 0, confidence n/h, cell counts capped at 255",
+    "model": f"fire_forecast_{TAG}",
+    "data": "NASA FIRMS active fires, type 0, nominal/high confidence, counts capped at 255",
     "region": REGION,
-    "train_period": [str(DATES[TRAIN_T[0]].date()), TRAIN_END],
+    "sensors": {
+        s: [str(DATES[avail[s][0]].date()), str(DATES[avail[s][1]].date())] for s in ACTIVE
+    },
+    "train_until": TRAIN_END,
     "bbox": GRIDS[REGION],
     "resolution_deg": RES,
     "grid": [NY, NX],
     "history_days": HISTORY_DAYS,
     "long_window_days": LONG_WINDOW,
     "leads": LEADS,
-    "channels": [f"log1p_count_t-{HISTORY_DAYS - 1 - i}" for i in range(HISTORY_DAYS)]
-    + ["log1p_sum_30d"]
-    + [f"climatology_t+{k + 1}" for k in range(LEADS)]
-    + ["doy_sin", "doy_cos", "mask", "lat_over_90", "lon_over_180"],
+    "channels": channels,
+    "outputs": [f"{s}_fire_t+{k + 1}" for s in ACTIVE for k in range(LEADS)],
+    "use_outputs": f"0..{LEADS - 1} (VIIRS head)",
     "test_region": "Brazil",
     "test_avg_precision": summary.mean().round(4).to_dict(),
     "test_brier": brier.mean().round(5).to_dict(),
 }
-(OUT_DIR / f"fire_forecast_{REGION}.json").write_text(json.dumps(meta, indent=2))
+(OUT_DIR / f"fire_forecast_{TAG}.json").write_text(json.dumps(meta, indent=2))
 
 import onnxruntime as ort  # noqa: E402
 
@@ -701,37 +834,30 @@ print("Saved to", OUT_DIR.resolve())
 model.to(DEVICE)
 
 # %% [markdown]
-# ## 10. Compare the Brazil and world models
+# ## 10. Compare every run
 #
-# Reads the saved test results of both runs (same Brazil test cells, days and truth).
+# Reads the saved test results of every run in the outputs folder (same Brazil test
+# cells, days and truth).
 
 # %%
-saved = {}
-for region in ("brazil", "world"):
-    path = OUT_DIR / f"test_results_{region}.json"
-    if path.exists():
-        saved[region] = json.loads(path.read_text())
+runs = {}
+for path in sorted(OUT_DIR.glob("test_results_*.json")):
+    r = json.loads(path.read_text())
+    runs[r.get("tag", r.get("region"))] = r
 
-if len(saved) < 2:
-    missing = {"brazil", "world"} - set(saved)
-    print(f"Run the notebook with REGION = {missing.pop()!r} to compare both models.")
+if len(runs) < 2:
+    print("Only one run so far. Change REGION / USE_MODIS and run again to compare.")
 else:
-    ap = pd.DataFrame(
-        {
-            "climatology": saved["brazil"]["avg_precision"]["climatology"],
-            "persistence": saved["brazil"]["avg_precision"]["persistence"],
-            "unet_brazil": saved["brazil"]["avg_precision"]["unet_brazil"],
-            "unet_world": saved["world"]["avg_precision"]["unet_world"],
-        }
-    )
-    br = pd.DataFrame(
-        {
-            "climatology": saved["brazil"]["brier"]["climatology"],
-            "persistence": saved["brazil"]["brier"]["persistence"],
-            "unet_brazil": saved["brazil"]["brier"]["unet_brazil"],
-            "unet_world": saved["world"]["brier"]["unet_world"],
-        }
-    )
+    ref = next(iter(runs.values()))
+    ap = {
+        "climatology": ref["avg_precision"]["climatology"],
+        "persistence": ref["avg_precision"]["persistence"],
+    }
+    br = {"climatology": ref["brier"]["climatology"], "persistence": ref["brier"]["persistence"]}
+    for tag, r in runs.items():
+        ap[f"unet_{tag}"] = r["avg_precision"][f"unet_{tag}"]
+        br[f"unet_{tag}"] = r["brier"][f"unet_{tag}"]
+    ap, br = pd.DataFrame(ap), pd.DataFrame(br)
     ap.index.name = br.index.name = "lead_day"
     print("Average precision, Brazil test 2024–2025 (higher is better)\n", ap.round(4))
     print("\nBrier score (lower is better)\n", br.round(5))
