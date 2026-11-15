@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import docs, forecast, history, live, system
-from app.config import get_settings
+from app.config import get_settings, redact
 from app.forecast.model import ForecastModel
 from app.forecast.service import ForecastService
 from app.history.store import HistoryStore
@@ -16,6 +16,23 @@ from app.realtime.pulse import PulseBroker
 from app.realtime.worker import RealtimeWorker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# httpx logs every request URL at INFO, and FIRMS URLs carry the map key.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _RedactSecrets(logging.Filter):
+    """Last line of defence: no log line may contain the FIRMS map key."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        clean = redact(message)
+        if clean != message:
+            record.msg, record.args = clean, ()
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RedactSecrets())
 
 
 @asynccontextmanager

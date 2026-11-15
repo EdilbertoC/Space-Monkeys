@@ -24,6 +24,10 @@ from app.forecast.model import ForecastModel
 
 log = logging.getLogger(__name__)
 
+# Highest probability the anchor may set: a fire seen today does not make another VIIRS
+# detection certain (clouds, overpass timing), and the fused confidence is a heuristic.
+ANCHOR_MAX = 0.95
+
 
 @dataclass
 class Forecast:
@@ -95,7 +99,8 @@ class ForecastService:
             row, col, inside = self.model.grid.cell_of(recent["lat"], recent["lon"])
             seen = recent["last_seen"].dt.tz_convert("UTC").dt.date
             first_lead = (seen - f.valid_dates[0]).map(lambda d: d.days).to_numpy(dtype=np.int64)
-            conf = recent["confidence"].to_numpy(dtype=np.float32)
+            # The fused confidence is a heuristic score, not a probability: cap it.
+            conf = recent["confidence"].to_numpy(dtype=np.float32).clip(0, ANCHOR_MAX)
             leads = len(f.base)
             for r, c, j0, p in zip(
                 row[inside], col[inside], first_lead[inside], conf[inside], strict=True

@@ -143,3 +143,17 @@ def test_forecast_endpoint(monkeypatch, model):
         card = client.get("/forecast/model").json()
         assert card["test_avg_precision"]["unet"] > card["test_avg_precision"]["climatology"]
     get_settings.cache_clear()
+
+
+def test_anchor_never_claims_certainty(model):
+    service = _service_with_flat_forecast(model)
+    fires = pd.DataFrame(
+        {
+            "lat": [-10.1],
+            "lon": [-50.1],
+            "confidence": [0.999],
+            "last_seen": [pd.Timestamp("2024-08-21T15:00", tz="UTC")],
+        }
+    )
+    service.apply_anchor(fires, now=datetime(2024, 8, 21, 16, tzinfo=UTC))
+    assert service.current.final.max() == pytest.approx(0.95)

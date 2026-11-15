@@ -87,3 +87,9 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def redact(text: str) -> str:
+    """Remove secrets (the FIRMS map key) from text shown in logs or API responses."""
+    key = get_settings().firms_map_key
+    return text.replace(key, "***") if key else text
