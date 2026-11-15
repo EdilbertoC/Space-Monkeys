@@ -100,6 +100,7 @@ Real-time and forecast routes:
 | GET | `/detections/recent?bbox=w,s,e,n&sensor=VIIRS` | Raw detections from every sensor (GeoJSON) |
 | GET | `/fires/stream` | SSE: one `snapshot` event on connect, then a `pulse` event after every poll and a `forecast` event when the forecast is re-anchored |
 | GET | `/forecast?min_p=0.05&bbox=w,s,e,n` | 7-day fire probability per 0.25° cell (lead 1 = today), with GOES anchoring |
+| GET | `/forecast/outlook?bbox=w,s,e,n` or `?biome=` | The forecast summed over an area next to the normal for those dates (`ratio_to_normal`); biome areas come from the historical data |
 | GET | `/forecast/model` | Forecast model card: data, inputs, test scores, status |
 
 Fire event properties: `fire_id`, `uncertainty_km` (~95% radius), `confidence` (0–1), `sensors`, `n_detections`, `first_seen`, `last_seen`, `frp_max_mw`.

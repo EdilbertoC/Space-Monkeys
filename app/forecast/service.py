@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from app.forecast.history import DEFAULT_SOURCE, fetch_daily_counts
-from app.forecast.model import ForecastModel
+from app.forecast.model import ForecastModel, day_of_year0
 
 log = logging.getLogger(__name__)
 
@@ -143,4 +143,46 @@ class ForecastService:
             "resolution_deg": self.model.grid.res,
             "min_p": min_p,
             "cells": cells,
+        }
+
+    def outlook(self, select: np.ndarray) -> dict:
+        """Forecast summed over an area, next to the normal for the same dates.
+
+        `select`: (ny, nx) boolean, the cells of the area. Both numbers are expected
+        fire cells per day (sum of probabilities over forecast cells): the forecast's,
+        and the climatology the model was trained with (VIIRS S-NPP, 2012-2022).
+        """
+        f = self.current
+        if f is None:
+            raise LookupError(self.last_error or "No forecast yet")
+        cells = select & self.model.mask
+        days = []
+        for k, valid in enumerate(f.valid_dates):
+            expected = float(f.final[k][cells].sum())
+            normal = float(self.model.climatology[day_of_year0(valid)][cells].sum())
+            days.append(
+                {
+                    "date": valid.isoformat(),
+                    "expected_fire_cells": round(expected, 2),
+                    "normal_fire_cells": round(normal, 2),
+                    "ratio_to_normal": round(expected / normal, 2) if normal > 0 else None,
+                }
+            )
+        expected = sum(d["expected_fire_cells"] for d in days)
+        normal = sum(d["normal_fire_cells"] for d in days)
+        return {
+            "model": self.model.name,
+            "issued_for": f.issued_for.isoformat(),
+            "generated_at": f.generated_at.isoformat(),
+            "anchored_at": f.anchored_at.isoformat() if f.anchored_at else None,
+            "unit": "expected_fire_cells_per_day",
+            "resolution_deg": self.model.grid.res,
+            "forecast_cells": int(cells.sum()),
+            "anchored_cells": int((f.anchored & select).sum()),
+            "days": days,
+            "week": {
+                "expected_fire_cell_days": round(expected, 2),
+                "normal_fire_cell_days": round(normal, 2),
+                "ratio_to_normal": round(expected / normal, 2) if normal > 0 else None,
+            },
         }
