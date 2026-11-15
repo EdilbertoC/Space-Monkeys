@@ -96,6 +96,31 @@ def test_ingest_normalizes_fields(data_dir):
     assert df.loc[-20.26743]["fire_type"] == 3
 
 
+COUNTRY_VIIRS_HEADER = (
+    "latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,instrument,"
+    "confidence,version,bright_ti5,frp,daynight,type"
+)
+# Copied from the FIRMS yearly country archive (viirs-snpp and modis, 2024, Australia).
+COUNTRY_SNPP = ["-30.70723,148.38664,339.52,0.44,0.46,2024-01-01,0325,N,VIIRS,n,2,304.5,7.7,D,0"]
+COUNTRY_MODIS = ["-13.5872,134.9733,325,1.2,1.1,2024-01-01,0039,Terra,MODIS,71,61.03,300.7,8.1,D,0"]
+
+
+def test_country_archive_csvs_name_the_viirs_satellite_like_the_area_download(tmp_path):
+    staging = tmp_path / "raw" / "firms" / "test" / "csv"
+    staging.mkdir(parents=True)
+    (staging / "fire_archive_SV-C2_2024.csv").write_text(
+        csv_text(COUNTRY_VIIRS_HEADER, COUNTRY_SNPP), encoding="utf-8"
+    )
+    (staging / "fire_archive_M-C61_2024.csv").write_text(
+        csv_text(ARCHIVE_HEADER, COUNTRY_MODIS), encoding="utf-8"
+    )
+    ingest.ingest("test", tmp_path)
+    df = _read(tmp_path).set_index("satellite")
+    assert sorted(df.index) == ["SNPP", "Terra"]  # the CSV says "N" for S-NPP
+    assert df.loc["SNPP", "brightness_k"] == pytest.approx(339.52)  # bright_ti4
+    assert df.loc["SNPP", "source"] == "FIRMS:VIIRS_SNPP_SP"
+
+
 def test_min_confidence_class_l_keeps_low_rows(data_dir):
     report = ingest.ingest("test", data_dir, min_confidence_class="l")
     assert report.totals["dropped_low_confidence"] == 0

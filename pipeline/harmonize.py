@@ -366,7 +366,9 @@ def intervals(monthly: pd.DataFrame) -> dict[str, list[float]]:
     return out
 
 
-def score(monthly: pd.DataFrame) -> dict:
+def score(monthly: pd.DataFrame, total: str = "Brazil") -> dict:
+    """Scores per biome and for the whole region, keyed `total` (its name, e.g. Brazil)."""
+
     def one(g: pd.DataFrame) -> dict:
         m, e, v = g["modis"], g["estimate"], g["viirs_naive"]
         return {
@@ -378,11 +380,11 @@ def score(monthly: pd.DataFrame) -> dict:
         }
 
     whole = monthly.groupby(["year", "month"])[["modis", "estimate", "viirs_naive"]].sum()
-    out = {"Brazil": one(whole)}
+    out = {total: one(whole)}
     for b, g in monthly.groupby("biome"):
         out[str(b)] = one(g)
     yearly = monthly.groupby("year")[["modis", "estimate", "viirs_naive"]].sum()
-    out["Brazil"]["by_year"] = [
+    out[total]["by_year"] = [
         {
             "year": int(y),
             "modis": int(r["modis"]),
@@ -566,8 +568,9 @@ def run(
         "folds": fold_info,
         "gap_factors": gaps,
         "interval_90": q,
-        "scores_out_of_fold": score(reference),
-        "after_reference": score(later) if len(later) else None,
+        "total": region.title(),
+        "scores_out_of_fold": score(reference, region.title()),
+        "after_reference": score(later, region.title()) if len(later) else None,
         "calibrators": calibrators,
     }
     report["applied"] = apply_after_training(data_dir, region, satellite, report, threads)
@@ -630,10 +633,11 @@ def main(argv: list[str] | None = None) -> None:
             f"{area:<17}{s['modis_fire_days']:>11,}{s['estimate']:>12,.0f}{s['bias']:>+9.1%}"
             f"{s['monthly_wape']:>12.1%}{s['naive_bias']:>+9.0%}{band_txt:>18}"
         )
-    by_year = list(r["scores_out_of_fold"]["Brazil"]["by_year"])
+    total = r["total"]
+    by_year = list(r["scores_out_of_fold"][total]["by_year"])
     if r["after_reference"]:
-        by_year += r["after_reference"]["Brazil"]["by_year"]
-    print("Brazil by year: MODIS / estimate / estimate vs MODIS / naive VIIRS")
+        by_year += r["after_reference"][total]["by_year"]
+    print(f"{total} by year: MODIS / estimate / estimate vs MODIS / naive VIIRS")
     for y in by_year:
         mark = "" if y["year"] <= r["reference_last_year"] else "  (MODIS orbits drifting)"
         diff = y["estimate"] / y["modis"] - 1 if y["modis"] else float("nan")

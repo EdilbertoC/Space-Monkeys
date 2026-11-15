@@ -49,6 +49,8 @@ Cleaning (`pipeline/ingest.py`):
 
 Areas: a pilot box over the Pantanal (west −60, south −22.5, east −54.5, north −15) and a national box over Brazil (west −74.5, south −34.5, east −28.5, north 6). The models are trained and scored on cells whose centre falls inside a Brazilian biome.
 
+A second country, Australia, tests whether the method travels (Section 9). Its detections come from the FIRMS yearly country archive (standard processing, MODIS 2000–2025, S-NPP 2012–2025, NOAA-20 2018–2025, no NOAA-21), cleaned the same way. Its calibration regions are the states and territories of Natural Earth admin-1 (1:50m, public domain) in place of biomes; the two small territories are merged into New South Wales.
+
 ## 4. The base unit: the fire cell-day
 
 Raw pixel counts depend on pixel size, so they cannot be compared between sensors. The record counts **fire cell-days**:
@@ -189,6 +191,17 @@ This difference is not a model error. It mixes the model's forward error with th
 
 **The provisional months behave like standard ones.** Estimate against observed MODIS, Brazil cells, for August, September, October and November: −1.3%, −5.2%, −25.6% and −29.8% in 2026 (VIIRS NRT, provisional), against −7.2%, −6.6%, −16.7% and −34.0% in 2025 (standard processing). S-NPP and NOAA-20 agree in the new months (September 2026: 17,902 and 17,987 expected fire cell-days). The NRT detections do not open a break in the record.
 
+**A second country.** Australia was run through the same code with no change to the method: the same features, folds, reference years, calibration and gap, with states as regions. Its fire is dominated by tropical savanna in the north, a regime unlike most of Brazil's.
+
+| | Brazil | Australia |
+|---|---|---|
+| Calibration regions | 6 biomes | 7 states and territories |
+| VIIRS as seen against MODIS | +145% | +87% |
+| Monthly WAPE, S-NPP (2012–2021) | 3.7% | 2.6% |
+| Monthly WAPE, NOAA-20 (2018–2021) | 6.3% | 7.4% |
+
+The 2012 step disappears there too (2012: MODIS 110,425 fire cell-days, S-NPP as seen 182,406, the estimate 107,438), and the error pattern by region repeats: 3.0–3.6% in the savanna states, 11–13% in Victoria and Tasmania, where fires are small and few, as in the Pampa. One result differs: after 2021 the Australian estimate stays within ±5% of observed MODIS (+3.6%, +1.2%, −5.2%, +2.1% for 2022–2025), while in Brazil observed MODIS rises 8–15% above it. The orbits drifted the same way over both, so how much the drift changes fire counts depends on the region; a different daily cycle of fire activity is one possible reason, not tested.
+
 ## 10. The calendar analytics
 
 The API never runs a model. The pipeline writes one serving table (`pipeline/serving.py`) with, per cell-day, the observed MODIS and VIIRS flags and the VIIRS estimate. `app/history/` sums it with DuckDB for the requested area and computes the analytics on the daily totals (`app/history/analytics.py`).
@@ -224,7 +237,7 @@ Percentiles are used rather than z-scores because they make no assumption about 
 - **Normals and trends that include 2022 onwards include drifted MODIS.** While MODIS still delivers data, the harmonized series is observed MODIS, so these years enter the default base period and the trend as observed. Section 9 suggests this raises recent counts.
 - **No clear-sky record.** FIRMS lists detections, not observations. A cloudy day and a day with no fire look the same, for every sensor alike. Satellite outages are detected only when they are region-wide (Section 4).
 - **Static sources.** The static-source mask comes from VIIRS labels. Industrial heat sources not labelled by FIRMS remain in the record.
-- **Coverage outside Brazil.** The estimate exists only in cells of a Brazilian biome. A box over Bolivia or Paraguay would lose that part after a switch to the estimate.
+- **Coverage outside Brazil.** The served estimate exists only in cells of a Brazilian biome. A box over Bolivia or Paraguay would lose that part after a switch to the estimate. Australia is harmonized in the pipeline but not served by the API, and its archive ends in 2025 with no NOAA-21.
 - **The two VIIRS satellites disagree in 2025.** The estimate is −15.1% from S-NPP and −8.9% from NOAA-20 alone. S-NPP has no gap day in 2025, so this is not explained yet. NOAA-20 has only 2018–2021 as reference, so its model is the noisier of the two.
 - **Hotspots are not burned area.** The record measures how often fire was detected in a cell, not how much land burned.
 

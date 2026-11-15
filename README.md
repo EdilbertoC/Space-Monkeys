@@ -203,7 +203,7 @@ docs/methodology.md    the harmonization method, its validation and its limits
 docs/api/openapi.yaml  API contract with the frontend
 models/             trained forecast model (ONNX, climatology, mask, model card)
 notebooks/          Colab notebooks (fire forecast model)
-scripts/            one-off data scripts (persistence table)
+scripts/            one-off data scripts (persistence table, FIRMS country archive download)
 tests/
 ```
 
@@ -446,6 +446,47 @@ The extra link adds almost no error: the chain is as good as its first link, and
 
 In serving, NOAA-21 covers the days neither S-NPP nor NOAA-20 was observing. There is no such day yet (no NOAA-20 outage overlaps an S-NPP outage after March 2023), so the served values do not change today; NOAA-21 takes over when NOAA-20 fails or ends.
 
+### A second country: Australia
+
+```bash
+python scripts/download_firms_country.py Australia australia   # FIRMS yearly country archive, ~2.7 GB
+# Natural Earth admin-1 (1:50m) in data/raw/naturalearth/ne_50m_admin_1_states_provinces.zip
+python -m pipeline.ingest australia
+python -m pipeline.cube australia
+python -m pipeline.biomes australia --country Australia     # states and territories as regions
+python -m pipeline.training australia --satellite SNPP
+python -m pipeline.training australia --satellite N20
+python -m pipeline.harmonize australia --satellite SNPP
+python -m pipeline.harmonize australia --satellite N20
+```
+
+The same code, with two inputs changed: the detections come from the FIRMS yearly country archive (standard processing, MODIS 2000–2025, S-NPP 2012–2025, NOAA-20 2018–2025; it has no NOAA-21), and the calibration regions are the states and territories of Natural Earth in place of the IBGE biomes. `pipeline.ingest` takes the VIIRS satellite from the product code, because the country archive writes `N` where the area download writes `SNPP`. Fire regimes differ a lot from Brazil's: most fire cell-days are tropical savanna in the Northern Territory, Western Australia and Queensland.
+
+Out-of-fold scores on the reference years, against observed MODIS:
+
+| Area | MODIS fire cell-days, S-NPP years | Monthly WAPE, S-NPP | Monthly WAPE, NOAA-20 | Naive VIIRS (bias) |
+|---|---|---|---|---|
+| Australia | 705,459 | 2.6% | 7.4% | +87% |
+| Northern Territory | 228,653 | 3.0% | 7.1% | +70% |
+| Western Australia | 201,012 | 3.5% | 8.3% | +64% |
+| Queensland | 167,814 | 3.6% | 7.1% | +108% |
+| New South Wales | 68,480 | 7.1% | 10.4% | +144% |
+| Victoria | 22,401 | 10.9% | 13.2% | +108% |
+| South Australia | 12,788 | 8.2% | 15.2% | +83% |
+| Tasmania | 4,311 | 12.9% | 15.1% | +196% |
+
+Australia, S-NPP estimate against observed MODIS, fire cell-days per year:
+
+| | 2012 | 2013–2021 | 2022 | 2023 | 2024 | 2025 |
+|---|---|---|---|---|---|---|
+| Estimate vs MODIS | −2.7% | −1.0% to +7.0% | +3.6% | +1.2% | −5.2% | +2.1% |
+
+What this shows:
+
+- **The method carries to another continent unchanged.** S-NPP lands closer to MODIS in Australia (2.6% monthly WAPE) than in Brazil (3.7%). The 2012 step is gone there too: MODIS 110,425 fire cell-days in 2012, S-NPP as seen 182,406, the estimate 107,438. 2020 is the worst reference year (+7.0%).
+- **The same pattern by region.** Error is low where large savanna fires dominate (Northern Territory, Western Australia, Queensland: 3.0–3.6%) and grows where fires are small and few (Victoria, Tasmania: 11–13%), as in the Pampa.
+- **No drift gap after 2021 in Australia.** Observed MODIS and the estimate stay within ±5% from 2022 to 2025, while in Brazil MODIS rises 8–15% above it. The orbits drifted the same way, so the effect of the drift on fire counts depends on the region. One possible reason is a different daily cycle of fire activity; it has not been tested.
+
 `data/` is not committed.
 
 ## Data sources
@@ -471,6 +512,11 @@ Historical record (pipeline), from the FIRMS archive download (https://firms.mod
 - Attribute fields (including `type`: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore): https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs
 - Pilot area: box west −60, south −22.5, east −54.5, north −15 (Pantanal), 2000-11-01 to 2026-11-14.
 - National area: box west −74.5, south −34.5, east −28.5, north 6 (Brazil and surroundings), same dates (requests 848644–848647).
+- Second country, Australia: the FIRMS yearly country archive, standard processing, `https://firms.modaps.eosdis.nasa.gov/data/country/{modis|viirs-snpp|viirs-jpss1}/{year}/{sensor}_{year}_Australia.csv` (MODIS C6.1 2000–2025, VIIRS S-NPP 2012–2025, VIIRS NOAA-20 2018–2025; NOAA-21 was not found in this archive), downloaded with `scripts/download_firms_country.py`.
+
+### Natural Earth admin-1 (calibration regions outside Brazil)
+
+- **Natural Earth 1:50m Cultural Vectors, Admin 1 – States, Provinces** (`ne_50m_admin_1_states_provinces.zip`, 0.9 MB), Natural Earth, public domain: https://www.naturalearthdata.com/downloads/50m-cultural-vectors/ (file from https://naciscdn.org/naturalearth/50m/cultural/). Used to label every 0.1° cell of Australia with its state or territory, the calibration region there in place of a biome (the Australian Capital Territory and Jervis Bay Territory are merged into New South Wales).
 
 ### IBGE biomes
 

@@ -34,12 +34,15 @@ import duckdb
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
 
-# FIRMS product code in the file name -> (sensor family, FIRMS source prefix).
+# FIRMS product code in the file name -> (sensor family, FIRMS source prefix,
+# satellite). A VIIRS product is one satellite, so the satellite comes from the
+# product: the area download writes "SNPP" in the CSV, the yearly country archive
+# "N". MODIS products hold Terra and Aqua; their satellite comes from the CSV.
 PRODUCTS = {
-    "M-C61": ("MODIS", "MODIS"),
-    "SV-C2": ("VIIRS", "VIIRS_SNPP"),
-    "J1V-C2": ("VIIRS", "VIIRS_NOAA20"),
-    "J2V-C2": ("VIIRS", "VIIRS_NOAA21"),
+    "M-C61": ("MODIS", "MODIS", None),
+    "SV-C2": ("VIIRS", "VIIRS_SNPP", "SNPP"),
+    "J1V-C2": ("VIIRS", "VIIRS_NOAA20", "N20"),
+    "J2V-C2": ("VIIRS", "VIIRS_NOAA21", "N21"),
 }
 _PRODUCT_RE = "|".join(map(re.escape, PRODUCTS))
 CSV_NAME = re.compile(rf"^fire_(archive|nrt)_({_PRODUCT_RE})_\d+\.csv$")
@@ -156,7 +159,10 @@ def ingest(
     type_expr = "TRY_CAST(type AS TINYINT)" if has_type else "CAST(NULL AS TINYINT)"
     bright4, bright5 = _brightness_columns(con)
 
-    products = ", ".join(f"('{k}', '{v[0]}', '{v[1]}')" for k, v in PRODUCTS.items())
+    products = ", ".join(
+        "('{}', '{}', '{}', {})".format(k, v[0], v[1], f"'{v[2]}'" if v[2] else "NULL")
+        for k, v in PRODUCTS.items()
+    )
     viirs_conf = ", ".join(f"'{k}': {v}" for k, v in VIIRS_CONFIDENCE.items())
     con.execute(f"""
         CREATE TEMP VIEW parsed AS
@@ -175,7 +181,7 @@ def ingest(
             'FIRMS:' || p.prefix || '_' || CASE b.kind WHEN 'archive' THEN 'SP' ELSE 'NRT' END
                 AS source,
             CASE b.kind WHEN 'archive' THEN 'SP' ELSE 'NRT' END AS processing,
-            trim(b.satellite) AS satellite,
+            coalesce(p.satellite, trim(b.satellite)) AS satellite,
             b.acq_date + make_time(CAST(substr(b.hhmm, 1, 2) AS BIGINT),
                                    CAST(substr(b.hhmm, 3, 2) AS BIGINT), 0) AS ts,
             CAST(b.latitude AS DOUBLE) AS lat,
@@ -197,7 +203,7 @@ def ingest(
             TRY_CAST({bright5} AS DOUBLE) AS bright_t31_k,
             b.acq_date AS date
         FROM base b
-        JOIN (VALUES {products}) p(product, sensor, prefix) USING (product)
+        JOIN (VALUES {products}) p(product, sensor, prefix, satellite) USING (product)
     """)
 
     # Static land sources (volcanoes, industry). One mask for every row:
