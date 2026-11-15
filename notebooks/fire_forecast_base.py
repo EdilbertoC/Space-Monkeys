@@ -13,6 +13,7 @@
 # | `USE_MODIS` | `False`: VIIRS 2012–2025. `True`: adds MODIS 2000–2016 as extra history |
 # | `RICH_INPUTS` | `True`: each cell-day also carries total FRP and night-time detections |
 # | `USE_WEATHER` | `True`: daily weather up to the forecast day (Brazil only) |
+# | `FUTURE_WEATHER` | experiment: observed weather of the 7 target days (not deployable) |
 # | `N_MODELS`, `TTA` | ensemble size, and averaging over mirrored maps |
 #
 # Every run is **scored on the same test**: Brazil, 2024–2025, truth = VIIRS detections
@@ -80,6 +81,7 @@ RES = 0.25  # grid resolution in degrees: 0.25 or 0.1 (0.1 only for "brazil")
 USE_MODIS = False  # True: add MODIS 2000–2016 as extra history
 RICH_INPUTS = True  # True: add FRP and night-time detections per cell-day
 USE_WEATHER = True  # True: add NASA POWER weather (IMERG rain, MERRA-2), Brazil only
+FUTURE_WEATHER = False  # True: perfect-weather-forecast experiment (not deployable)
 N_MODELS = 3  # ensemble: models trained with different seeds, probabilities averaged
 TTA = True  # also average each model over mirrored maps (test-time augmentation)
 
@@ -114,11 +116,13 @@ assert REGION in GRIDS, REGION
 assert RES in (0.25, 0.1), "RES must be 0.25 or 0.1"
 assert not (REGION == "world" and RES < 0.25), "the world at 0.1° does not fit on a Colab GPU"
 assert not (REGION == "world" and USE_WEATHER), "weather inputs are prepared for Brazil only"
+assert USE_WEATHER or not FUTURE_WEATHER, "FUTURE_WEATHER needs USE_WEATHER"
 TAG = (
     REGION
     + ("_modis" if USE_MODIS else "")
     + ("_rich" if RICH_INPUTS else "")
     + ("_wx" if USE_WEATHER else "")
+    + ("_perfectwx" if FUTURE_WEATHER else "")
     + ("" if RES == 0.25 else f"_res{RES}")
 )
 print("Run tag:", TAG)
@@ -410,6 +414,9 @@ if USE_WEATHER:
     merra_g = torch.from_numpy(merra_np).to(DEVICE)
     mrow_g = torch.from_numpy(mrow).to(DEVICE)
     mcol_g = torch.from_numpy(mcol).to(DEVICE)
+    if FUTURE_WEATHER:  # observed weather of the target days (perfect forecast)
+        WX_CHANNELS += [f"future_rain_log1p_t+{k + 1}" for k in range(LEADS)]
+        WX_CHANNELS += [f"future_rh_over100_t+{k + 1}" for k in range(LEADS)]
     WX_N = len(WX_CHANNELS)
 else:
     WX_N = 0
@@ -574,13 +581,16 @@ def features(t: int, win: tuple[slice, slice] = FULL, hide: tuple[str, ...] = ()
 
 
 def gpu_weather(t: int, ys: slice, xs: slice) -> torch.Tensor:
-    """Weather channels for day t over a window (uses only days <= t)."""
+    """Weather channels for day t over a window.
+
+    Uses only days <= t, unless FUTURE_WEATHER adds the observed target days.
+    """
     lo = max(t - DRY_WINDOW + 1, 0)
     rain = rain_g[lo : t + 1, ys, xs].float()  # (<= 60, h, w)
     dry = torch.cumprod((rain < 1.0).flip(0).float(), dim=0).sum(0)  # dry days ending at t
     rows, cols = mrow_g[ys], mcol_g[xs]
     m = merra_g[:, max(t - 6, 0) : t + 1][:, :, rows][:, :, :, cols].float()  # var, 7, h, w
-    return torch.stack(
+    base = torch.stack(
         [
             torch.log1p(rain[-1]),
             torch.log1p(rain[-7:].sum(0)),
@@ -593,6 +603,12 @@ def gpu_weather(t: int, ys: slice, xs: slice) -> torch.Tensor:
             m[3, -1],
         ]
     )
+    if not FUTURE_WEATHER:
+        return base
+    ahead = slice(t + 1, t + 1 + LEADS)
+    future_rain = torch.log1p(rain_g[ahead, ys, xs].float())
+    future_rh = merra_g[1, ahead][:, rows][:, :, cols].float() / 100
+    return torch.cat([base, future_rain, future_rh])
 
 
 def eval_targets(t: int) -> np.ndarray:
@@ -1018,7 +1034,10 @@ plt.show()
             "region": REGION,
             "resolution_deg": RES,
             "sensors": ACTIVE,
-            "features": FEATS + (["weather"] if USE_WEATHER else []),
+            "features": FEATS
+            + (["weather"] if USE_WEATHER else [])
+            + (["perfect_forecast"] if FUTURE_WEATHER else []),
+            "deployable": not FUTURE_WEATHER,
             "n_models": N_MODELS,
             "tta": TTA,
             "single_model_avg_precision": round(float(single["avg_precision"].mean()), 5),
@@ -1154,6 +1173,7 @@ meta = {
         ),
         "night": "night-time (daynight == N) detections, capped at 255; channel = log1p(n)",
     },
+    "deployable": not FUTURE_WEATHER,
     "weather": {
         "rain": "NASA POWER GPM IMERG daily precipitation (mm/day), mean over each cell",
         "merra2": f"NASA POWER MERRA-2 daily {WX_VARS}, nearest cell; production: GEOS-IT",
