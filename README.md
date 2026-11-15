@@ -6,6 +6,8 @@ The goal is to harmonize records from different sensors (MODIS, VIIRS, GOES ABI)
 
 This repository holds the API, the real-time worker and the multi-sensor fusion. The frontend lives in [Space-Monkeys-Front](https://github.com/ryangustav/Space-Monkeys-Front).
 
+**How the harmonization works and why: [docs/methodology.md](docs/methodology.md).**
+
 ## What runs today
 
 | Part | What it does |
@@ -196,6 +198,7 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
   figures.py         validation figures (docs/figures/)
   serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
+docs/methodology.md    the harmonization method, its validation and its limits
 docs/api/openapi.yaml  API contract with the frontend
 models/             trained forecast model (ONNX, climatology, mask, model card)
 notebooks/          Colab notebooks (fire forecast model)
