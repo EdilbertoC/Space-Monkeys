@@ -8,7 +8,9 @@ One row per 0.1° cell and UTC day with any fire signal:
 - est:   MODIS-equivalent expected fire-days from the VIIRS model (pipeline.harmonize):
          S-NPP where it has an estimate, NOAA-20 after the last S-NPP estimate and
          on the days S-NPP was not observing (pipeline.cube.observation_gaps);
-         NULL where there is none
+         NULL where there is none. It runs to the last VIIRS day: the days after the
+         training table come from the VIIRS-only application table, and those after
+         VIIRS standard processing are provisional (meta coverage standard_until)
 
 plus meta.json: coverage per sensor, biomes, harmonization method and switch date,
 model scores and monthly intervals per biome, known data gaps (from the FIRMS Readme

@@ -10,8 +10,10 @@ import pytest
 
 pytest.importorskip("duckdb")
 
-from pipeline import cube, training  # noqa: E402
-from tests.test_cube import report_and_cube  # noqa: E402, F401  (fixture)
+from pipeline import cube, ingest, training  # noqa: E402
+from tests.firms_samples import ARCHIVE_HEADER, NRT_HEADER, csv_text, write_zip  # noqa: E402
+from tests.test_cube import AQUA, N20, SNPP, report_and_cube  # noqa: E402, F401  (fixture)
+from tests.test_ingest import SNPP_NRT  # noqa: E402
 
 
 def _build(tmp_path, satellite):
@@ -74,3 +76,74 @@ def test_n20_table_uses_only_noaa20(report_and_cube, tmp_path):  # noqa: F811
 def test_unknown_satellite_is_rejected(tmp_path):
     with pytest.raises(ValueError):
         training.build_training("test", tmp_path, "Terra")
+    with pytest.raises(ValueError):
+        training.build_application("test", tmp_path, "Terra")
+
+
+# ---- application table ---------------------------------------------------------------
+NRT_A = (-17.40159, -59.57053)  # 2026-08-01, S-NPP NRT
+NRT_B = (-18.03111, -59.62153)
+
+
+def _cube_from(tmp_path, with_modis=True, with_nrt=True):
+    """Cube from the real rows of the cube tests, plus two real S-NPP NRT detections
+    of 2026-08-01 (from the ingest tests)."""
+    raw = tmp_path / "raw" / "firms" / "test"
+    raw.mkdir(parents=True)
+    snpp = {"fire_archive_SV-C2_1.csv": csv_text(ARCHIVE_HEADER, SNPP)}
+    if with_nrt:
+        snpp["fire_nrt_SV-C2_1.csv"] = csv_text(NRT_HEADER, SNPP_NRT)
+    write_zip(raw / "DL_FIRE_SV-C2_1.zip", snpp)
+    write_zip(
+        raw / "DL_FIRE_J1V-C2_1.zip", {"fire_archive_J1V-C2_1.csv": csv_text(ARCHIVE_HEADER, N20)}
+    )
+    if with_modis:
+        write_zip(
+            raw / "DL_FIRE_M-C61_1.zip",
+            {"fire_archive_M-C61_1.csv": csv_text(ARCHIVE_HEADER, AQUA)},
+        )
+    ingest.ingest("test", tmp_path)
+    cube.build_cube("test", tmp_path)
+
+
+def _read_app(tmp_path, satellite="SNPP"):
+    df = pd.read_parquet(tmp_path / "processed" / "test" / "application" / satellite)
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    return df.set_index(["cell_id", "date"])
+
+
+def test_application_continues_after_the_training_table_with_nrt(tmp_path):
+    _cube_from(tmp_path)
+    training.build_training("test", tmp_path, "SNPP")  # ends 2020-09-18 (last MODIS day)
+    report = training.build_application("test", tmp_path, "SNPP")
+    assert report["period"] == ["2020-09-19", "2026-08-01"]
+    assert report["standard_until"] == "2020-09-18"
+    df = _read_app(tmp_path)
+    # The day after the 2020 fire (3x3, lag), and the 3x3 of each NRT detection.
+    assert report["rows"] == len(df) == 9 + 9 + 9
+    assert not any(c in df.columns for c in ("modis", "terra", "aqua", "split"))
+    assert set(training.FEATURES) <= set(df.columns)
+    after = df.loc[(_cell(*FIRE), date(2020, 9, 19))]
+    assert (after["v_pixels"], after["lag1_pixels"]) == (0, 4)  # sees the day before
+    own = df.loc[(_cell(*NRT_A), date(2026, 8, 1))]
+    assert (own["v_pixels"], own["v_night"]) == (1, 1)
+
+
+def test_application_rows_match_the_training_table(tmp_path):
+    _cube_from(tmp_path, with_nrt=False)
+    _, train = _build(tmp_path, "SNPP")
+    training.build_application("test", tmp_path, "SNPP", start="2012-01-20", end="2020-09-18")
+    app = _read_app(tmp_path)
+    assert sorted(app.index) == sorted(train.index)
+    pd.testing.assert_frame_equal(
+        app.loc[train.index, training.FEATURES], train[training.FEATURES], check_dtype=False
+    )
+
+
+def test_application_needs_no_modis(tmp_path):
+    _cube_from(tmp_path, with_modis=False)
+    with pytest.raises(ValueError):
+        training.build_training("test", tmp_path, "SNPP")
+    report = training.build_application("test", tmp_path, "SNPP")
+    assert report["period"] == ["2012-01-20", "2026-08-01"]
+    assert report["rows"] == len(_read_app(tmp_path)) == 9 * 2 + 9 * 2 + 9 * 2

@@ -150,6 +150,7 @@ What we learned:
 2. **Calibration per biome.** An isotonic map from the out-of-fold probability to the observed MODIS rate, one per IBGE biome. One national map left the Pantanal 6% high and Caatinga and Pampa 11–13% low.
 3. **Coverage gap.** Per biome and calendar month, g = (all MODIS fire-days) / (MODIS fire-days inside the rows), over the reference years. Each calibrated probability is multiplied by g, so an area's estimate is Σ p × g: an expected count of MODIS fire cell-days, not an integer. In the wet season g can be large (up to 5 in the Cerrado in March). There, most of the estimate is the gap, not what VIIRS saw. The gap cannot be placed on a map: per cell it is spread over the cells where VIIRS saw activity.
 4. **90% interval.** Per biome, the 5th and 95th percentiles of the relative error of reference monthly totals (actual / estimate − 1, months with at least 20 estimated fire-days) give the interval [est × (1 + q05), est × (1 + q95)].
+5. **Beyond the training table.** The training table needs MODIS, so it stops on the last day with standard processing for both sensors. The days after it come from an **application table**: the same rows and features, built from VIIRS alone, with no MODIS column. They get the final model with the calibration and gap of the reference years. On days both tables cover, they are identical (checked on 1,689,111 S-NPP rows of August–September 2024 and 321,965 NOAA-20 rows of July 2026). This is what lets the record continue after MODIS ends. Today it also carries the estimate past the end of VIIRS standard processing (2026-07-31) to 2026-11-14, on NRT detections, flagged provisional.
 
 **Out-of-fold scores on the reference years.** The bias is close to zero by construction, because calibration and gap are fitted on these rows, so the monthly error is the number to read:
 
@@ -180,6 +181,8 @@ What we learned:
 | Estimate vs observed MODIS, Brazil | −3.5% to +3.1% | −0.8% | −8.3% | −8.4% | −15.1% |
 
 This difference is not a model error. It mixes the model's forward error with the change in MODIS itself, and we have not measured how much is each. The timing matches the orbit drift: Aqua moving towards the afternoon peak of fire activity would raise its counts.
+
+**The provisional months behave like standard ones.** Estimate against observed MODIS, Brazil cells, for August, September, October and November: −1.3%, −5.2%, −25.6% and −29.8% in 2026 (VIIRS NRT, provisional), against −7.2%, −6.6%, −16.7% and −34.0% in 2025 (standard processing). S-NPP and NOAA-20 agree in the new months (September 2026: 17,902 and 17,987 expected fire cell-days). The NRT detections do not open a break in the record.
 
 ## 10. The calendar analytics
 
@@ -222,9 +225,7 @@ Percentiles are used rather than z-scores because they make no assumption about 
 
 ## 12. Open decisions
 
-- **When the harmonized series switches from MODIS to the VIIRS estimate.** Today the switch happens only when MODIS stops delivering data. Switching on 2022-01-01 (`python -m pipeline.serving brazil --switch-date 2022-01-01`) would remove the orbit drift from recent normals and trends. Two things are missing first:
-  - the estimate stops on the last day with standard-processing data (2026-07-31), so the months after it would be empty;
-  - after MODIS ends the training table cannot be built, because it needs MODIS dates. The final model exists; running it on VIIRS-only days is the next step.
+- **When the harmonized series switches from MODIS to the VIIRS estimate.** Today the switch happens only when MODIS stops delivering data. Switching on 2022-01-01 (`python -m pipeline.serving brazil --switch-date 2022-01-01`) would remove the orbit drift from recent normals and trends. The estimate now reaches the last VIIRS day without MODIS (Section 8, step 5), so a switch leaves no empty months. What remains is the decision itself.
 - **NOAA-21.** It never overlapped stable-orbit MODIS, so it is not calibrated. S-NPP ended on 2026-11-02, which leaves NOAA-20 as the only calibrated VIIRS satellite. How to bring NOAA-21 in (for example through its overlap with NOAA-20) is not decided.
 
 ## 13. The real-time layer (not part of the harmonization)

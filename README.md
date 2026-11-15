@@ -344,11 +344,16 @@ What this shows:
 python -m pipeline.training brazil --satellite N20     # national NOAA-20 table, ~8 min
 python -m pipeline.harmonize brazil --satellite SNPP   # resumes saved folds
 python -m pipeline.harmonize brazil --satellite N20
+# the days after the training table (NRT now, everything after MODIS ends), per satellite:
+python -m pipeline.training brazil --satellite SNPP --application   # VIIRS only, no MODIS
+python -m pipeline.harmonize brazil --satellite SNPP --apply-only   # saved model, no refit
 python -m pipeline.figures brazil                      # docs/figures/*.png
 python -m pipeline.serving brazil                      # the table /history reads, ~20 s
 ```
 
 **What the harmonized series is.** MODIS observed while MODIS delivers data. When MODIS ends (or earlier, at a switch date the team may set, see below), it becomes the MODIS-equivalent estimate from VIIRS: S-NPP until it ended (2026-11-02), then NOAA-20. The estimate is computed for every day since 2012 anyway, to check the hand-over.
+
+**The estimate does not need MODIS.** The training table stops on the last day with standard processing for both MODIS and the satellite. The days after it come from an application table with the same rows and features, built from VIIRS alone, and get the final model with the reference calibration and gap. On days both tables cover they are identical (checked on real data: 1,689,111 S-NPP rows of August–September 2024 and 321,965 NOAA-20 rows of July 2026, no difference). Today this carries the estimate from 2026-07-31 (end of VIIRS standard processing) to 2026-11-14 on NRT detections, flagged provisional; after MODIS ends, it is the only way the record continues.
 
 **The reference is MODIS with stable orbits (up to 2021).** Terra and Aqua are drifting. Median local solar time of their daytime detections over Brazil, from the FIRMS archive:
 
@@ -398,7 +403,8 @@ What this shows and what is still open:
 - **The 2012 step is gone.** The naive record (MODIS, then VIIRS) more than doubles in 2012; the MODIS-equivalent estimate follows MODIS year by year through 2021. Pantanal 2020, from models that never saw 2020: the S-NPP estimate is within ±25% of MODIS every month (+11% to +13% at the August–September peak) and NOAA-20 tracks it closely, while S-NPP as seen is 29% to 112% above MODIS depending on the month.
 - **After 2021 observed MODIS rises above the estimate**, more each year (−8% in 2023–2024, −15% in 2025), as its orbits drift. This is a forward prediction from a model that only knows stable-orbit MODIS, so the difference mixes the model's forward error with the change in MODIS. We have not measured how much is each. The timing matches the drift; Aqua moving towards the afternoon peak of fire activity would raise its counts.
 - **The two VIIRS satellites disagree in 2025**: −15.1% from S-NPP, −8.9% from NOAA-20 alone. S-NPP has no gap day in 2025, so this is not explained yet. S-NPP ended in 2026; NOAA-20 has only 2018–2021 as reference, so its model is the noisier of the two.
-- **The switch date is an open decision.** `python -m pipeline.serving brazil --switch-date 2022-01-01` serves the VIIRS estimate from 2022, which removes the drift from recent trends. Two things are missing before that: the estimate stops on the last day with standard-processing data (2026-07-31), so the months after it would be empty; and after MODIS ends the training table cannot be built at all, because it needs MODIS dates. The final model exists; running it on VIIRS-only days is the next step.
+- **The NRT months behave like standard ones.** Estimate against observed MODIS, Brazil cells, August to November 2026 (VIIRS NRT, provisional) and the same months of 2025 (standard processing): −1.3% / −7.2%, −5.2% / −6.6%, −25.6% / −16.7%, −29.8% / −34.0%. S-NPP and NOAA-20 agree in the new months (September 2026: 17,902 and 17,987 expected fire cell-days). The large gaps from October to December, in both years, are the drift pattern above seen month by month.
+- **The switch date is an open decision.** `python -m pipeline.serving brazil --switch-date 2022-01-01` serves the VIIRS estimate from 2022, which removes the drift from recent trends. The estimate now runs to the last VIIRS day without MODIS, so a switch leaves no empty months; what remains is the decision itself.
 - **Areas that cross the border.** The estimate exists only in cells of a Brazilian biome. A box over Bolivia or Paraguay would lose that part after a switch.
 - Per-cell values remain much less certain than area totals; the gap of small fires is spread over cells where VIIRS saw activity.
 

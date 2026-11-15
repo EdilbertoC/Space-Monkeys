@@ -34,14 +34,20 @@ inference time.
 
 Only dates where both sensors have standard processing are used (no NRT tail).
 
+The application table (`--application`) has the same rows and features where the
+training table cannot reach: after its last date, including the satellite's NRT
+days and the days after MODIS ends. It has no MODIS column, so it never needs MODIS.
+
 Input:  data/processed/<region>/cube/
 Output: data/processed/<region>/training/<SAT>/year=YYYY/*.parquet
         data/processed/<region>/training/<SAT>_report.json
+        data/processed/<region>/application/<SAT>/year=YYYY/*.parquet (--application)
 
 Usage::
 
     python -m pipeline.training pantanal              # S-NPP
     python -m pipeline.training pantanal --satellite N20
+    python -m pipeline.training brazil --satellite SNPP --application
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
@@ -101,51 +108,32 @@ def _offsets(radius: int) -> str:
     return "(VALUES " + ", ".join(rows) + ") o(dr, dc, ring)"
 
 
-def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: str = "SNPP") -> dict:
-    if satellite not in SATELLITES:
-        raise ValueError(f"satellite must be one of {', '.join(SATELLITES)}")
-    cfg = SATELLITES[satellite]
-    cube_dir = data_dir / "processed" / region / "cube"
-    out_dir = data_dir / "processed" / region / "training" / satellite
-    if not cube_dir.exists():
-        raise FileNotFoundError(f"{cube_dir} not found; run `python -m pipeline.cube {region}`")
-
-    con = duckdb.connect()
-    con.execute(f"SET temp_directory = '{(data_dir / 'tmp').as_posix()}'")
+def _cube_view(con: duckdb.DuckDBPyConnection, cube_dir: Path, nrt: bool) -> None:
+    """Temp view `cube`, with or without the NRT rows."""
+    where = "" if nrt else "WHERE NOT nrt"
     con.execute(f"""
         CREATE TEMP VIEW cube AS
         SELECT * FROM read_parquet('{cube_dir.as_posix()}/**/*.parquet', hive_partitioning = true)
-        WHERE NOT nrt
+        {where}
     """)
-    # Last date with standard processing for both MODIS and this satellite.
-    last_sp = con.execute(
-        "SELECT least(max(date) FILTER (sensor = 'MODIS'), max(date) FILTER (satellite = ?)) "
-        "FROM cube",
-        [satellite],
-    ).fetchone()[0]
-    if last_sp is None:
-        raise ValueError(f"no standard-processing {satellite} and MODIS data in {cube_dir}")
-    first = cfg["start"]
-    period = f"date BETWEEN DATE '{first}' AND DATE '{last_sp}'"
 
+
+def _viirs_tables(con: duckdb.DuckDBPyConnection, satellite: str, first: str, last: str) -> None:
+    """Temp tables from the satellite alone, for the days first..last:
+
+    - v: its own cell-days (read from 3 days before `first`, so the lags and the
+      candidate rule of the first days see the days before them);
+    - ctx: neighbourhood and lag sums, and the candidate flag, per cell-day."""
     con.execute(f"""
         CREATE TEMP TABLE v AS
         SELECT cell_id, date,
                n_pixels AS v_pixels, frp_sum_mw AS v_frp_sum, frp_max_mw AS v_frp_max,
                n_day AS v_day, n_night AS v_night, n_high AS v_high,
                n_overpasses AS v_overpasses, scan_mean_km AS v_scan_mean
-        FROM cube WHERE satellite = '{satellite}' AND {period}
+        FROM cube
+        WHERE satellite = '{satellite}'
+          AND date BETWEEN DATE '{first}' - INTERVAL 3 DAY AND DATE '{last}'
     """)
-    con.execute(f"""
-        CREATE TEMP TABLE m AS
-        SELECT cell_id, date,
-               sum(n_pixels) AS modis_pixels,
-               bool_or(satellite = 'Terra') AS terra,
-               bool_or(satellite = 'Aqua') AS aqua
-        FROM cube WHERE sensor = 'MODIS' AND {period}
-        GROUP BY cell_id, date
-    """)
-
     # Spread every VIIRS cell-day to the cells and days it informs, then sum.
     con.execute(f"""
         CREATE TEMP TABLE ctx AS
@@ -155,7 +143,7 @@ def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: st
             FROM v, {_offsets(2)}, (VALUES (0), (1), (2), (3)) lag(l)
             WHERE (lag.l = 0) OR o.ring <= 1
         )
-        SELECT cell_id, date,
+        SELECT cell_id, CAST(date AS DATE) AS date,
                coalesce(sum(v_pixels) FILTER (l = 0 AND ring = 1), 0) AS nb3_pixels,
                count(*) FILTER (l = 0 AND ring = 1) AS nb3_cells,
                coalesce(sum(v_pixels) FILTER (l = 0 AND ring = 2), 0) AS nb5_pixels,
@@ -165,17 +153,78 @@ def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: st
                coalesce(sum(v_pixels) FILTER (l = 1 AND ring = 1), 0) AS lag1_nb3_pixels,
                bool_or(ring <= 1 AND l <= 1) AS candidate
         FROM spread
-        WHERE date <= DATE '{last_sp}'
-        GROUP BY cell_id, date
+        WHERE date BETWEEN DATE '{first}' AND DATE '{last}'
+        GROUP BY cell_id, CAST(date AS DATE)
     """)
 
-    # Biome per cell (pipeline.biomes), a label for evaluation, never a feature.
+
+# The feature columns of a candidate row, from ctx c and v (same names as FEATURES).
+FEATURE_SQL = f"""
+    coalesce(v.v_pixels, 0) AS v_pixels,
+    coalesce(v.v_frp_sum, 0) AS v_frp_sum,
+    coalesce(v.v_frp_max, 0) AS v_frp_max,
+    coalesce(v.v_day, 0) AS v_day,
+    coalesce(v.v_night, 0) AS v_night,
+    coalesce(v.v_high, 0) AS v_high,
+    coalesce(v.v_overpasses, 0) AS v_overpasses,
+    v.v_scan_mean,
+    c.nb3_pixels, c.nb3_cells, c.nb5_pixels, c.nb5_cells,
+    c.lag1_pixels, c.lag23_pixels, c.lag1_nb3_pixels,
+    month(c.date) AS month,
+    sin(2 * pi() * (dayofyear(c.date) - 1) / 365.25) AS doy_sin,
+    cos(2 * pi() * (dayofyear(c.date) - 1) / 365.25) AS doy_cos,
+    round((c.cell_id // {N_COLS}) / 10 - 90 + 0.05, 2) AS cell_lat,
+    round((c.cell_id % {N_COLS}) / 10 - 180 + 0.05, 2) AS cell_lon
+"""
+
+
+def _biome_source(data_dir: Path, region: str) -> str:
+    """Biome per cell (pipeline.biomes), a label for evaluation, never a feature."""
     biome_file = data_dir / "processed" / region / "cell_biome.parquet"
-    biome_source = (
-        f"(SELECT cell_id, biome FROM read_parquet('{biome_file.as_posix()}'))"
-        if biome_file.exists()
-        else "(SELECT CAST(NULL AS BIGINT) AS cell_id, CAST(NULL AS VARCHAR) AS biome)"
-    )
+    if biome_file.exists():
+        return f"(SELECT cell_id, biome FROM read_parquet('{biome_file.as_posix()}'))"
+    return "(SELECT CAST(NULL AS BIGINT) AS cell_id, CAST(NULL AS VARCHAR) AS biome)"
+
+
+def _check(satellite: str, cube_dir: Path, region: str) -> None:
+    if satellite not in SATELLITES:
+        raise ValueError(f"satellite must be one of {', '.join(SATELLITES)}")
+    if not cube_dir.exists():
+        raise FileNotFoundError(f"{cube_dir} not found; run `python -m pipeline.cube {region}`")
+
+
+def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: str = "SNPP") -> dict:
+    cfg = SATELLITES.get(satellite, {})
+    cube_dir = data_dir / "processed" / region / "cube"
+    out_dir = data_dir / "processed" / region / "training" / satellite
+    _check(satellite, cube_dir, region)
+
+    con = duckdb.connect()
+    con.execute(f"SET temp_directory = '{(data_dir / 'tmp').as_posix()}'")
+    _cube_view(con, cube_dir, nrt=False)
+    # Last date with standard processing for both MODIS and this satellite (least()
+    # skips NULL, so a missing sensor is checked first: no MODIS would read as no fire).
+    last_modis, last_sat = con.execute(
+        "SELECT max(date) FILTER (sensor = 'MODIS'), max(date) FILTER (satellite = ?) FROM cube",
+        [satellite],
+    ).fetchone()
+    if last_modis is None or last_sat is None:
+        raise ValueError(f"no standard-processing {satellite} and MODIS data in {cube_dir}")
+    last_sp = min(last_modis, last_sat)
+    first = cfg["start"]
+    period = f"date BETWEEN DATE '{first}' AND DATE '{last_sp}'"
+
+    _viirs_tables(con, satellite, first, str(last_sp))
+    con.execute(f"""
+        CREATE TEMP TABLE m AS
+        SELECT cell_id, date,
+               sum(n_pixels) AS modis_pixels,
+               bool_or(satellite = 'Terra') AS terra,
+               bool_or(satellite = 'Aqua') AS aqua
+        FROM cube WHERE sensor = 'MODIS' AND {period}
+        GROUP BY cell_id, date
+    """)
+    biome_source = _biome_source(data_dir, region)
 
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -186,21 +235,7 @@ def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: st
                 c.cell_id, c.date, year(c.date) AS year,
                 CASE WHEN year(c.date) <= {cfg["train_last_year"]} THEN 'train' ELSE 'test' END
                     AS split,
-                coalesce(v.v_pixels, 0) AS v_pixels,
-                coalesce(v.v_frp_sum, 0) AS v_frp_sum,
-                coalesce(v.v_frp_max, 0) AS v_frp_max,
-                coalesce(v.v_day, 0) AS v_day,
-                coalesce(v.v_night, 0) AS v_night,
-                coalesce(v.v_high, 0) AS v_high,
-                coalesce(v.v_overpasses, 0) AS v_overpasses,
-                v.v_scan_mean,
-                c.nb3_pixels, c.nb3_cells, c.nb5_pixels, c.nb5_cells,
-                c.lag1_pixels, c.lag23_pixels, c.lag1_nb3_pixels,
-                month(c.date) AS month,
-                sin(2 * pi() * (dayofyear(c.date) - 1) / 365.25) AS doy_sin,
-                cos(2 * pi() * (dayofyear(c.date) - 1) / 365.25) AS doy_cos,
-                round((c.cell_id // {N_COLS}) / 10 - 90 + 0.05, 2) AS cell_lat,
-                round((c.cell_id % {N_COLS}) / 10 - 180 + 0.05, 2) AS cell_lon,
+                {FEATURE_SQL},
                 CAST(m.cell_id IS NOT NULL AS TINYINT) AS modis,
                 coalesce(m.modis_pixels, 0) AS modis_pixels,
                 coalesce(m.terra, false) AS terra,
@@ -261,12 +296,100 @@ def build_training(region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: st
     return report
 
 
+def build_application(
+    region: str,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    satellite: str = "SNPP",
+    start: str | None = None,
+    end: str | None = None,
+) -> dict:
+    """The rows and features of the training table where it cannot reach, from VIIRS
+    alone: no MODIS column, so it can be built after MODIS ends.
+
+    By default it runs from the day after the training table's last date to the
+    satellite's last day in the cube. It includes the satellite's NRT days: their
+    estimate is provisional, as the API already marks every period after standard
+    processing. The model, calibration and gap stay those of the reference years
+    (pipeline.harmonize applies them).
+
+    Output: data/processed/<region>/application/<SAT>/year=YYYY/*.parquet and
+    <SAT>_report.json.
+    """
+    cube_dir = data_dir / "processed" / region / "cube"
+    out_dir = data_dir / "processed" / region / "application" / satellite
+    _check(satellite, cube_dir, region)
+
+    con = duckdb.connect()
+    con.execute(f"SET temp_directory = '{(data_dir / 'tmp').as_posix()}'")
+    _cube_view(con, cube_dir, nrt=True)
+    sat_last, sat_standard_until = con.execute(
+        "SELECT max(date), max(date) FILTER (NOT nrt) FROM cube WHERE satellite = ?",
+        [satellite],
+    ).fetchone()
+    if sat_last is None:
+        raise ValueError(f"no {satellite} data in {cube_dir}")
+    if start is None:
+        report_file = data_dir / "processed" / region / "training" / f"{satellite}_report.json"
+        if report_file.exists():
+            train_last = json.loads(report_file.read_text(encoding="utf-8"))["period"][1]
+            start = str(date.fromisoformat(train_last) + timedelta(days=1))
+        else:
+            start = SATELLITES[satellite]["start"]
+    end = end or str(sat_last)
+
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    rows = 0
+    if start <= end:
+        _viirs_tables(con, satellite, start, end)
+        con.execute(f"""
+            COPY (
+                SELECT c.cell_id, c.date, year(c.date) AS year, {FEATURE_SQL}, b.biome
+                FROM ctx c
+                LEFT JOIN v USING (cell_id, date)
+                LEFT JOIN {_biome_source(data_dir, region)} b USING (cell_id)
+                WHERE c.candidate
+                ORDER BY c.date, c.cell_id
+            ) TO '{out_dir.as_posix()}' (FORMAT parquet, PARTITION_BY (year), COMPRESSION zstd)
+        """)
+        rows = con.execute(
+            f"SELECT count(*) FROM read_parquet('{out_dir.as_posix()}/**/*.parquet')"
+        ).fetchone()[0]
+    con.close()
+
+    report = {
+        "region": region,
+        "satellite": satellite,
+        "period": [start, end],
+        "standard_until": str(sat_standard_until) if sat_standard_until else None,
+        "rows": rows,
+        "features": FEATURES,
+    }
+    (out_dir.parent / f"{satellite}_report.json").write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
+    )
+    return report
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("region", help="folder name under data/processed/, e.g. pantanal")
     parser.add_argument("--satellite", choices=list(SATELLITES), default="SNPP")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument(
+        "--application",
+        action="store_true",
+        help="build the VIIRS-only application table after the training table's last date",
+    )
     args = parser.parse_args(argv)
+    if args.application:
+        r = build_application(args.region, args.data_dir, args.satellite)
+        print(
+            f"{r['satellite']} application table: {r['period'][0]} to {r['period'][1]}, "
+            f"{r['rows']:,} rows (standard processing until {r['standard_until']}, NRT after)"
+        )
+        return
     report = build_training(args.region, args.data_dir, args.satellite)
 
     print(
