@@ -98,3 +98,35 @@ def test_report_combines_sensors_with_or(report_and_cube):
     assert years[2012]["modis"] == 0
     assert years[2012]["p_modis_given_viirs"] == 0.0
     assert report["detections_in"] == report["detections_in_cube"] == 10
+
+
+def test_observation_gaps_find_the_snpp_outage_of_july_2022(tmp_path):
+    """Real rows around the S-NPP outage of 2022-07-27..08-10: NOAA-20 saw this fire
+    on 2022-07-28, the S-NPP archive has no detection anywhere that day."""
+    n20_outage = [
+        "-15.34047,-55.04046,342.1,0.44,0.46,2022-07-28,1738,N20,VIIRS,n,2,302.6,31.64,D,0",
+        "-15.337,-55.04549,367,0.44,0.46,2022-07-28,1738,N20,VIIRS,h,2,326.48,97.15,D,0",
+    ]
+    snpp_back = ["-15.4444,-55.7379,331.45,0.42,0.38,2022-08-11,1727,SNPP,SNPP,n,2,300.58,1.07,D,0"]
+    raw = tmp_path / "raw" / "firms" / "test"
+    raw.mkdir(parents=True)
+    for product, rows in (("SV-C2", SNPP + snpp_back), ("J1V-C2", N20 + n20_outage)):
+        write_zip(
+            raw / f"DL_FIRE_{product}_1.zip",
+            {f"fire_archive_{product}_1.csv": csv_text(ARCHIVE_HEADER, rows)},
+        )
+    ingest.ingest("test", tmp_path)
+    cube.build_cube("test", tmp_path)
+
+    outage = pd.Timestamp("2022-07-28").date()
+    assert cube.observation_gaps("test", tmp_path, min_other=1) == {"SNPP": [outage]}
+    # 2012-01-20 is before NOAA-20's first day, so NOAA-20 has no gap there; and one
+    # fire cell-day is too little to call a gap with the default threshold.
+    assert cube.observation_gaps("test", tmp_path) == {}
+
+
+def test_date_runs_and_sql_dates():
+    d = [pd.Timestamp(x).date() for x in ("2022-07-28", "2022-07-27", "2022-08-11")]
+    assert cube.date_runs(d) == [(d[1], d[0]), (d[2], d[2])]
+    assert cube.sql_dates(d[:1]) == "DATE '2022-07-28'"
+    assert "DATE" in cube.sql_dates([])  # a valid, never-matching list

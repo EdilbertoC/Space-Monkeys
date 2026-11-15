@@ -49,7 +49,17 @@ def get_area(
         raise HTTPException(404, f"unknown or expired area_id {area_id}") from exc
 
 
+VIIRS_NOT_COMPARABLE = (
+    "series=viirs cannot be compared across years: it counts fire seen by any VIIRS "
+    "satellite, and NOAA-20 (2018) and NOAA-21 (2023) add detections. Use "
+    "series=harmonized or series=modis; the calendar and the map still show viirs."
+)
+
+
 def _check_series(store: HistoryStore, series: str) -> None:
+    """For the routes that compare years (climatology, anomaly, season, trend)."""
+    if series == "viirs":
+        raise HTTPException(422, VIIRS_NOT_COMPARABLE)
     if series == "harmonized" and store.meta["harmonization"]["status"] != "available":
         raise HTTPException(409, "harmonized series not available yet; use series=modis")
 
@@ -67,7 +77,7 @@ def _span(store: HistoryStore, series: str) -> tuple[date, date]:
 
 
 def _base(store: HistoryStore, series: str, start: int | None, end: int | None) -> range:
-    first = start if start is not None else (2013 if series == "viirs" else 2003)
+    first = start if start is not None else 2003
     last = end if end is not None else an.last_complete_year(_span(store, series)[1])
     if last < first:
         raise HTTPException(422, "base_end_year must not be before base_start_year")

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -38,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from pipeline import baselines
+from pipeline.cube import sql_dates
 from pipeline.training import FEATURES, SATELLITES, TARGET
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,12 +62,17 @@ def load_training_sample(
     satellite: str,
     rate: float = SAMPLE_RATE,
     splits: tuple[str, ...] = ("train",),
+    last_year: int | None = None,
+    exclude_dates: list[date] | None = None,
 ) -> pd.DataFrame:
     """Every own-detection row plus a hash-chosen `rate` of the neighbour/lag-only
-    rows (weight 1/rate), Brazil cells only. Features are read as 32-bit floats."""
+    rows (weight 1/rate), Brazil cells only. Features are read as 32-bit floats.
+    Optionally only years up to `last_year` and without the days in `exclude_dates`."""
     cols = ", ".join(f"CAST({f} AS FLOAT) AS {f}" for f in FEATURES)
     keep = int(rate * 1000)
     split_list = ", ".join(f"'{s}'" for s in splits)
+    extra = f"AND year <= {int(last_year)} " if last_year is not None else ""
+    extra += f"AND date NOT IN ({sql_dates(exclude_dates or [])})"
     return (
         duckdb.connect()
         .execute(f"""
@@ -74,6 +81,7 @@ def load_training_sample(
             FROM {_table(data_dir, region, satellite)}
             WHERE split IN ({split_list}) AND biome IS NOT NULL
               AND (v_pixels > 0 OR hash(cell_id, date) % 1000 < {keep})
+              {extra}
         """)
         .fetchdf()
     )
@@ -114,6 +122,33 @@ def coverage_by_biome(data_dir: Path, region: str, satellite: str, test_from: in
     total, inside = sum(r[1] for r in rows), sum(r[2] for r in rows)
     out["Brazil"] = round(inside / total, 4) if total else None
     return out
+
+
+def score_groups(cols: dict[str, np.ndarray], models: list[str]) -> dict:
+    """baselines.evaluate_arrays for Brazil and each biome, every model on the same rows.
+
+    cols holds y, cell_id, year, month, biome and one probability array per model;
+    by-year totals are kept for Brazil only."""
+    results = {}
+    for g in ["Brazil", *sorted(set(cols["biome"]))]:
+        mask = np.ones(len(cols["y"]), bool) if g == "Brazil" else cols["biome"] == g
+        if not cols["y"][mask].sum():
+            continue
+        results[g] = {
+            m: {
+                k: v
+                for k, v in baselines.evaluate_arrays(
+                    cols["y"][mask],
+                    cols[m][mask].astype(float),
+                    cols["cell_id"][mask],
+                    cols["year"][mask],
+                    cols["month"][mask],
+                ).items()
+                if k != "by_year" or g == "Brazil"
+            }
+            for m in models
+        }
+    return results
 
 
 def run(
@@ -171,27 +206,7 @@ def run(
         )
         del df
     cols = {k: np.concatenate(v) for k, v in parts.items()}
-
-    groups = ["Brazil", *sorted(set(cols["biome"]))]
-    results = {}
-    for g in groups:
-        mask = np.ones(len(cols["y"]), bool) if g == "Brazil" else cols["biome"] == g
-        if not cols["y"][mask].sum():
-            continue
-        results[g] = {
-            m: {
-                k: v
-                for k, v in baselines.evaluate_arrays(
-                    cols["y"][mask],
-                    cols[m][mask].astype(float),
-                    cols["cell_id"][mask],
-                    cols["year"][mask],
-                    cols["month"][mask],
-                ).items()
-                if k != "by_year" or g == "Brazil"
-            }
-            for m in models
-        }
+    results = score_groups(cols, models)
 
     out = data_dir / "processed" / region / "models" / satellite
     baselines.save_lightgbm(out, booster, info)
