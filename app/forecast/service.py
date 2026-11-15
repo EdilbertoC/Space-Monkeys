@@ -19,10 +19,14 @@ import httpx
 import numpy as np
 import pandas as pd
 
-from app.forecast.history import fetch_daily_counts
-from app.forecast.model import ForecastModel
+from app.forecast.history import DEFAULT_SOURCE, fetch_daily_counts
+from app.forecast.model import ForecastModel, day_of_year0
 
 log = logging.getLogger(__name__)
+
+# Highest probability the anchor may set: a fire seen today does not make another VIIRS
+# detection certain (clouds, overpass timing), and the fused confidence is a heuristic.
+ANCHOR_MAX = 0.95
 
 
 @dataclass
@@ -45,8 +49,11 @@ class Forecast:
 
 
 class ForecastService:
-    def __init__(self, model: ForecastModel, anchor_hours: float = 12.0) -> None:
+    def __init__(
+        self, model: ForecastModel, anchor_hours: float = 12.0, source: str = DEFAULT_SOURCE
+    ) -> None:
         self.model = model
+        self.source = source  # FIRMS NRT source that feeds the model
         self.anchor_hours = anchor_hours
         lags = model.meta["persistence"]["p_fire_after_lag_days_given_fire"]
         # persistence[j] = P(fire j days after a fire), j = 0 … leads-1; j = 0 is 1.
@@ -92,7 +99,8 @@ class ForecastService:
             row, col, inside = self.model.grid.cell_of(recent["lat"], recent["lon"])
             seen = recent["last_seen"].dt.tz_convert("UTC").dt.date
             first_lead = (seen - f.valid_dates[0]).map(lambda d: d.days).to_numpy(dtype=np.int64)
-            conf = recent["confidence"].to_numpy(dtype=np.float32)
+            # The fused confidence is a heuristic score, not a probability: cap it.
+            conf = recent["confidence"].to_numpy(dtype=np.float32).clip(0, ANCHOR_MAX)
             leads = len(f.base)
             for r, c, j0, p in zip(
                 row[inside], col[inside], first_lead[inside], conf[inside], strict=True
@@ -166,4 +174,46 @@ class ForecastService:
             "anchored_at": f.anchored_at.isoformat() if f.anchored_at else None,
             "resolution_deg": self.model.grid.res,
             "regions": regions,
+        }
+
+    def outlook(self, select: np.ndarray) -> dict:
+        """Forecast summed over an area, next to the normal for the same dates.
+
+        `select`: (ny, nx) boolean, the cells of the area. Both numbers are expected
+        fire cells per day (sum of probabilities over forecast cells): the forecast's,
+        and the climatology the model was trained with (VIIRS S-NPP, 2012-2022).
+        """
+        f = self.current
+        if f is None:
+            raise LookupError(self.last_error or "No forecast yet")
+        cells = select & self.model.mask
+        days = []
+        for k, valid in enumerate(f.valid_dates):
+            expected = float(f.final[k][cells].sum())
+            normal = float(self.model.climatology[day_of_year0(valid)][cells].sum())
+            days.append(
+                {
+                    "date": valid.isoformat(),
+                    "expected_fire_cells": round(expected, 2),
+                    "normal_fire_cells": round(normal, 2),
+                    "ratio_to_normal": round(expected / normal, 2) if normal > 0 else None,
+                }
+            )
+        expected = sum(d["expected_fire_cells"] for d in days)
+        normal = sum(d["normal_fire_cells"] for d in days)
+        return {
+            "model": self.model.name,
+            "issued_for": f.issued_for.isoformat(),
+            "generated_at": f.generated_at.isoformat(),
+            "anchored_at": f.anchored_at.isoformat() if f.anchored_at else None,
+            "unit": "expected_fire_cells_per_day",
+            "resolution_deg": self.model.grid.res,
+            "forecast_cells": int(cells.sum()),
+            "anchored_cells": int((f.anchored & select).sum()),
+            "days": days,
+            "week": {
+                "expected_fire_cell_days": round(expected, 2),
+                "normal_fire_cell_days": round(normal, 2),
+                "ratio_to_normal": round(expected / normal, 2) if normal > 0 else None,
+            },
         }

@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pandas as pd
 
-from app.config import Settings
+from app.config import Settings, redact
 from app.forecast.service import ForecastService
 from app.realtime import detections, firms, goes
 from app.realtime.geojson import feature_collection
@@ -106,7 +106,7 @@ class RealtimeWorker:
                 status.last_success, status.last_error = now, None
             except (httpx.HTTPError, firms.FirmsError, RuntimeError, ValueError) as exc:
                 log.warning("Forecast refresh failed: %s", exc)
-                self.forecast.last_error = status.last_error = str(exc)
+                self.forecast.last_error = status.last_error = redact(str(exc))
         if self.forecast.current is None:
             return
         anchored = self.forecast.apply_anchor(self.state.fires, now)
@@ -134,7 +134,7 @@ class RealtimeWorker:
             )
         except (httpx.HTTPError, OSError, ValueError) as exc:
             log.warning("GOES poll failed: %s", exc)
-            status.last_error = str(exc)
+            status.last_error = redact(str(exc))
             return detections.empty()
         self._last_goes_key = key or self._last_goes_key
         status.last_success = datetime.now(UTC)
@@ -154,7 +154,7 @@ class RealtimeWorker:
         for source in s.firms_sources:
             status = self.status.source(f"FIRMS:{source}")
             if source in errors:
-                status.last_error = errors[source]
+                status.last_error = redact(errors[source])
             else:
                 status.last_success = now
                 status.last_error = None

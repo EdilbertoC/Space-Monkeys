@@ -1,6 +1,7 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 from datetime import UTC, datetime
 
+import httpx
 import numpy as np
 import pytest
 
@@ -75,3 +76,35 @@ def test_goes_scan_start_from_file_name():
     key = "ABI-L2-FDCF/2026/318/12/OR_ABI-L2-FDCF-M6_G19_s20263181200210_e2026_c2026.nc"
     assert goes.scan_start(key) == datetime(2026, 11, 14, 12, 0, 21, tzinfo=UTC)
     assert goes.satellite_id(key) == "G19"
+
+
+def _mock_client(statuses: list[int]) -> httpx.AsyncClient:
+    replies = iter(statuses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        code = next(replies)
+        return httpx.Response(code, text=VIIRS_CSV if code == 200 else "error")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_firms_retries_server_errors(monkeypatch):
+    monkeypatch.setattr(firms, "RETRY_DELAYS", (0, 0, 0))
+    async with _mock_client([500, 503, 200]) as client:
+        df = await firms.fetch_source(client, "SECRETKEY", "VIIRS_NOAA20_NRT", (-60, -20, -50, -10))
+    assert len(df) == 2
+
+
+async def test_firms_errors_never_contain_the_key(monkeypatch):
+    monkeypatch.setattr(firms, "RETRY_DELAYS", (0, 0, 0))
+    async with _mock_client([500] * 4) as client:
+        with pytest.raises(firms.FirmsError) as err:
+            await firms.fetch_source(client, "SECRETKEY", "VIIRS_NOAA20_NRT", (-60, -20, -50, -10))
+    assert "SECRETKEY" not in str(err.value) and "HTTP 500" in str(err.value)
+
+
+async def test_firms_does_not_retry_client_errors(monkeypatch):
+    monkeypatch.setattr(firms, "RETRY_DELAYS", (0, 0, 0))
+    async with _mock_client([403, 200]) as client:
+        with pytest.raises(firms.FirmsError, match="HTTP 403"):
+            await firms.fetch_source(client, "SECRETKEY", "VIIRS_NOAA20_NRT", (-60, -20, -50, -10))

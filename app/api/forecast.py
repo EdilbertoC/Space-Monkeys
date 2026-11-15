@@ -2,7 +2,9 @@
 """Fire forecast endpoints."""
 
 import threading
+from typing import Literal
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import parse_bbox
@@ -64,3 +66,42 @@ def forecast_summary(request: Request, service: ForecastService = Depends(get_fo
         return service.region_summary(*labels)
     except LookupError as exc:
         raise HTTPException(503, f"Forecast not available yet: {exc}") from exc
+
+
+Biome = Literal["Amazon", "Caatinga", "Cerrado", "Atlantic Forest", "Pampa", "Pantanal"]
+
+
+@router.get(
+    "/forecast/outlook",
+    summary="The 7-day forecast summed over an area, next to the normal for those dates",
+)
+def forecast_outlook(
+    request: Request,
+    bbox: tuple[float, float, float, float] | None = Depends(parse_bbox),
+    biome: Biome | None = Query(None, description="A Brazilian biome (needs the history data)."),
+    service: ForecastService = Depends(get_forecast),
+) -> dict:
+    if (bbox is None) == (biome is None):
+        raise HTTPException(400, "give exactly one of bbox, biome")
+    lat, lon = service.model.grid.centers()
+    lat2, lon2 = np.meshgrid(lat, lon, indexing="ij")
+    if bbox is not None:
+        w, s, e, n = bbox
+        select = (lon2 >= w) & (lon2 <= e) & (lat2 >= s) & (lat2 <= n)
+        area = {"kind": "bbox", "bbox": list(bbox)}
+    else:
+        store = getattr(request.app.state, "history", None)
+        if store is None:
+            raise HTTPException(503, "biome areas need the historical data; use bbox")
+        # The 0.1° history cell that holds each forecast cell centre.
+        rows = np.floor((lat2 + 90) * 10).astype(np.int64)
+        cols = np.floor((lon2 + 180) * 10).astype(np.int64)
+        select = np.isin(rows * 3600 + cols, store.biome_cell_ids(biome))
+        area = {"kind": "biome", "biome": biome}
+    try:
+        out = service.outlook(select)
+    except LookupError as exc:
+        raise HTTPException(503, f"Forecast not available yet: {exc}") from exc
+    if out["forecast_cells"] == 0:
+        raise HTTPException(422, "the area holds no forecast cell")
+    return {"area": area, **out}

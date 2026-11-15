@@ -55,10 +55,12 @@ class Settings(BaseSettings):
     forecast_model_dir: str = "models/fire_forecast_brazil"
     forecast_refresh_hours: float = Field(default=6.0, gt=0)
     forecast_anchor_hours: float = Field(default=12.0, gt=0)
+    # FIRMS NRT source fed to the model (S-NPP, the training satellite, ended 2026-11-02)
+    forecast_source: str = "VIIRS_NOAA20_NRT"
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://localhost:8443"]
+        default_factory=lambda: ["*"]  # public read-only API, no cookies or auth
     )
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
 
@@ -87,3 +89,9 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def redact(text: str) -> str:
+    """Remove secrets (the FIRMS map key) from text shown in logs or API responses."""
+    key = get_settings().firms_map_key
+    return text.replace(key, "***") if key else text

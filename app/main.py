@@ -8,8 +8,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import forecast, history, live, system
-from app.config import get_settings
+from app.api import docs, forecast, history, live, system
+from app.config import get_settings, redact
 from app.forecast.model import ForecastModel
 from app.forecast.service import ForecastService
 from app.history.store import HistoryStore
@@ -18,6 +18,23 @@ from app.realtime.pulse import PulseBroker
 from app.realtime.worker import RealtimeWorker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# httpx logs every request URL at INFO, and FIRMS URLs carry the map key.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _RedactSecrets(logging.Filter):
+    """Last line of defence: no log line may contain the FIRMS map key."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        clean = redact(message)
+        if clean != message:
+            record.msg, record.args = clean, ()
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RedactSecrets())
 
 
 def _warm(store: HistoryStore) -> None:
@@ -52,7 +69,11 @@ async def lifespan(app: FastAPI):
     app.state.forecast = None
     if settings.enable_forecast:
         model = ForecastModel(Path(settings.forecast_model_dir))
-        app.state.forecast = ForecastService(model, anchor_hours=settings.forecast_anchor_hours)
+        app.state.forecast = ForecastService(
+            model,
+            anchor_hours=settings.forecast_anchor_hours,
+            source=settings.forecast_source,
+        )
     app.state.worker = None
     if settings.enable_worker:
         app.state.worker = RealtimeWorker(
@@ -75,6 +96,8 @@ def create_app() -> FastAPI:
             "7-day fire forecast from a U-Net trained on the NASA FIRMS archive."
         ),
         lifespan=lifespan,
+        docs_url=None,  # /docs and /redoc show the hand-written contract (app/api/docs.py)
+        redoc_url=None,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -86,6 +109,7 @@ def create_app() -> FastAPI:
     app.include_router(live.router)
     app.include_router(history.router)
     app.include_router(forecast.router)
+    app.include_router(docs.router)
     return app
 
 

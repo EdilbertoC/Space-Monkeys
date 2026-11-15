@@ -173,3 +173,43 @@ def test_region_summary_counts_expected_fire_cells(model):
     assert pantanal["cells_at_least_50"] == [1] * 7
     assert brazil == {**pantanal, "kind": "country", "name": "Brazil"}
     assert summary["valid_dates"][0] == "2024-08-21"
+
+
+def test_anchor_never_claims_certainty(model):
+    service = _service_with_flat_forecast(model)
+    fires = pd.DataFrame(
+        {
+            "lat": [-10.1],
+            "lon": [-50.1],
+            "confidence": [0.999],
+            "last_seen": [pd.Timestamp("2024-08-21T15:00", tz="UTC")],
+        }
+    )
+    service.apply_anchor(fires, now=datetime(2024, 8, 21, 16, tzinfo=UTC))
+    assert service.current.final.max() == pytest.approx(0.95)
+
+
+def test_forecast_outlook_compares_with_normal(monkeypatch, model):
+    monkeypatch.setenv("ENABLE_WORKER", "false")
+    get_settings.cache_clear()
+    from app.main import create_app
+
+    with TestClient(create_app()) as client:
+        client.app.state.forecast.current = _service_with_flat_forecast(model, p=0.2).current
+        body = client.get("/forecast/outlook", params={"bbox": "-60,-20,-50,-10"}).json()
+        lat, lon = model.grid.centers()
+        inside = (lon[None, :] >= -60) & (lon[None, :] <= -50) & (lat[:, None] >= -20)
+        inside &= (lat[:, None] <= -10) & model.mask
+        n = int(inside.sum())
+        assert body["forecast_cells"] == n and len(body["days"]) == 7
+        day = body["days"][0]
+        assert day["date"] == "2024-08-21"
+        assert day["expected_fire_cells"] == pytest.approx(0.2 * n, abs=0.02)
+        normal = float(model.climatology[day_of_year0(date(2024, 8, 21))][inside].sum())
+        assert day["normal_fire_cells"] == pytest.approx(normal, abs=0.02)
+        assert body["week"]["expected_fire_cell_days"] == pytest.approx(1.4 * n, abs=0.1)
+        assert client.get("/forecast/outlook").status_code == 400
+        assert client.get("/forecast/outlook", params={"biome": "Pantanal"}).status_code == 503
+        ocean = client.get("/forecast/outlook", params={"bbox": "-36,-33,-35,-32"})
+        assert ocean.status_code == 422
+    get_settings.cache_clear()

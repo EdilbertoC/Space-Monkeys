@@ -201,6 +201,17 @@ class HistoryStore:
         pred = "cell_id IN (SELECT cell_id FROM cell_biome WHERE biome IS NOT NULL)"
         return Area("country", cells, pred, {"country": code})
 
+    def biome_cell_ids(self, biome: str) -> np.ndarray:
+        """Ids of the 0.1° cells of a biome (used by the forecast outlook)."""
+        if biome not in self.biome_cells:
+            raise AreaError(f"unknown biome {biome}")
+        rows = (
+            self.con.cursor()
+            .execute("SELECT cell_id FROM cell_biome WHERE biome = ?", [biome])
+            .fetchnumpy()
+        )
+        return rows["cell_id"].astype(np.int64)
+
     def create_area(self, geometry: dict) -> tuple[Area, dict]:
         cells = cells_in_geometry(geometry, self.limits["max_area_cells"])
         area_id = hashlib.sha1(cells.tobytes()).hexdigest()[:16]

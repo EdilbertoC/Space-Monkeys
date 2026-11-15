@@ -83,3 +83,32 @@ def test_api_live_endpoints(monkeypatch):
         assert status["worker"]["enabled"] is False
         assert status["live"]["fires"] == 2
     get_settings.cache_clear()
+
+
+def test_llms_txt_is_served(monkeypatch):
+    with _client(monkeypatch) as client:
+        r = client.get("/llms.txt")
+        assert r.status_code == 200
+        assert r.text.startswith("# OrbitBurn API")
+        assert "/history/calendar" in r.text and "/forecast" in r.text
+        assert "/llms.txt" not in client.get("/openapi.json").json()["paths"]
+    get_settings.cache_clear()
+
+
+def test_human_docs_use_the_contract(monkeypatch):
+    with _client(monkeypatch) as client:
+        page = client.get("/docs")
+        assert page.status_code == 200 and "/contract.json" in page.text
+        assert client.get("/redoc").status_code == 200
+        spec = client.get("/contract.json").json()
+        assert spec["servers"][0]["url"] == "/"
+        assert "/history/calendar" in spec["paths"] and "/forecast" in spec["paths"]
+        assert "fire cell-day" in spec["info"]["description"].lower()
+    get_settings.cache_clear()
+
+
+def test_cors_allows_any_origin(monkeypatch):
+    with _client(monkeypatch) as client:
+        r = client.get("/health", headers={"Origin": "https://example.org"})
+        assert r.headers["access-control-allow-origin"] == "*"
+    get_settings.cache_clear()

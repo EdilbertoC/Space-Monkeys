@@ -1,0 +1,4 @@
+discloud.config text eol=lf
+.discloudignore text eol=lf
+requirements.txt text eol=lf
+.env text eol=lf
