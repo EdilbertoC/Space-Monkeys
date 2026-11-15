@@ -58,7 +58,7 @@ class Settings(BaseSettings):
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["http://localhost:5173"]
+        default_factory=lambda: ["*"]  # public read-only API, no cookies or auth
     )
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
 

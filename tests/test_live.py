@@ -105,3 +105,10 @@ def test_human_docs_use_the_contract(monkeypatch):
         assert "/history/calendar" in spec["paths"] and "/forecast" in spec["paths"]
         assert "fire cell-day" in spec["info"]["description"].lower()
     get_settings.cache_clear()
+
+
+def test_cors_allows_any_origin(monkeypatch):
+    with _client(monkeypatch) as client:
+        r = client.get("/health", headers={"Origin": "https://example.org"})
+        assert r.headers["access-control-allow-origin"] == "*"
+    get_settings.cache_clear()

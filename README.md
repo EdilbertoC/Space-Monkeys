@@ -59,7 +59,6 @@ Before zipping the project for upload:
    ```
    FIRMS_MAP_KEY=<your key>
    HISTORY_DATA_DIR=history_data
-   CORS_ORIGINS=https://<frontend address>
    ```
 
 3. Upload the zip on Discloud (a site needs the Platinum plan or higher). Check `https://orbitburn.discloud.app/health` and `/docs`.
@@ -189,7 +188,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FORECAST_REFRESH_HOURS` | `6` | How often the base forecast is recomputed (needs `FIRMS_MAP_KEY`) |
 | `FORECAST_ANCHOR_HOURS` | `12` | How recent a live fire must be to anchor the forecast |
 | `FORECAST_SOURCE` | `VIIRS_NOAA20_NRT` | FIRMS NRT source fed to the forecast model (S-NPP ended 2026-11-02) |
-| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins |
+| `CORS_ORIGINS` | `*` | Origins allowed to call the API from a browser; `*` = any (the API is public, read-only and uses no cookies). Comma-separated list to restrict |
 | `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 
 ## Project layout
