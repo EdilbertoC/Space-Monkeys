@@ -1,5 +1,6 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
@@ -43,6 +44,9 @@ class Settings(BaseSettings):
     # Multi-sensor fusion
     fusion_radius_km: float = Field(default=2.0, gt=0)
     fusion_window_hours: float = Field(default=12.0, gt=0)
+
+    # Burning activity calendar: folder written by `python -m pipeline.serving`
+    history_data_dir: Path = Path("data/processed/brazil/serving")
 
     # Fire forecast (U-Net, see notebooks/fire_forecast_base.py)
     enable_forecast: bool = True
