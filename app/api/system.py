@@ -1,5 +1,8 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
-from fastapi import APIRouter, Depends
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 
 from app.api.deps import get_broker, get_state, get_worker
 from app.realtime.live import LiveState
@@ -7,6 +10,16 @@ from app.realtime.pulse import PulseBroker
 from app.realtime.worker import RealtimeWorker
 
 router = APIRouter(tags=["system"])
+
+LLMS_TXT = Path(__file__).resolve().parents[2] / "llms.txt"
+
+
+@router.get("/llms.txt", include_in_schema=False, response_class=PlainTextResponse)
+def llms_txt() -> str:
+    """Plain-language guide to this API for language models (llmstxt.org format)."""
+    if not LLMS_TXT.exists():
+        raise HTTPException(404, "llms.txt is not deployed with this server")
+    return LLMS_TXT.read_text(encoding="utf-8")
 
 
 @router.get("/health")

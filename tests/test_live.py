@@ -83,3 +83,13 @@ def test_api_live_endpoints(monkeypatch):
         assert status["worker"]["enabled"] is False
         assert status["live"]["fires"] == 2
     get_settings.cache_clear()
+
+
+def test_llms_txt_is_served(monkeypatch):
+    with _client(monkeypatch) as client:
+        r = client.get("/llms.txt")
+        assert r.status_code == 200
+        assert r.text.startswith("# OrbitBurn API")
+        assert "/history/calendar" in r.text and "/forecast" in r.text
+        assert "/llms.txt" not in client.get("/openapi.json").json()["paths"]
+    get_settings.cache_clear()

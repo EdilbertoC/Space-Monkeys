@@ -10,6 +10,7 @@ WORKDIR /srv
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY models ./models
+COPY llms.txt ./
 RUN pip install .
 
 RUN useradd --create-home appuser
