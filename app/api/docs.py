@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 
@@ -29,14 +29,14 @@ def _contract() -> dict:
 
 
 @router.get("/contract.json")
-def contract(request: Request) -> dict:
+def contract() -> dict:
     if not CONTRACT.exists():
         raise HTTPException(404, "docs/api/openapi.yaml is not deployed with this server")
     spec = deepcopy(_contract())
-    base = str(request.base_url).rstrip("/")
-    spec["servers"] = [{"url": base, "description": "This server"}] + [
-        s for s in spec.get("servers", []) if s.get("url") != base
-    ]
+    # A relative server URL makes "Try it out" call the host and scheme the page was
+    # opened with. Behind an HTTPS proxy the app itself sees plain HTTP, and an absolute
+    # http:// URL from an https:// page is blocked by the browser ("Failed to fetch").
+    spec["servers"] = [{"url": "/", "description": "This server"}] + spec.get("servers", [])
     return spec
 
 
