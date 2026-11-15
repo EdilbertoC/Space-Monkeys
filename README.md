@@ -14,8 +14,7 @@ This repository holds the API, the real-time worker and the multi-sensor fusion.
 | Multi-sensor fusion | Merges detections of the same fire from different sensors into one event with a better position, an uncertainty radius and a combined confidence |
 | Pulse stream | Pushes new, updated and expired fires to the frontend over Server-Sent Events after each poll |
 | API | FastAPI, GeoJSON responses, interactive docs at `/docs` |
-
-Historical harmonization (MODIS/VIIRS calendar, climatology, anomalies) is in progress.
+| Burning activity calendar | `/history` routes: fire cell-days over time for a bbox, a biome or a drawn polygon, the normal year, anomalies, season dates, long-term trend and a map, on the harmonized MODIS/VIIRS record since 2000 |
 
 ## Quick start
 
@@ -46,7 +45,28 @@ docker build -t space-monkeys-back .
 docker run -p 8000:8000 --env-file .env space-monkeys-back
 ```
 
+The `/history` routes read a folder built by the pipeline (`python -m pipeline.serving brazil`, see "Historical pipeline"); it is not in the image. Mount it and point `HISTORY_DATA_DIR` at it, for example `-v $PWD/data/processed/brazil/serving:/srv/history -e HISTORY_DATA_DIR=/srv/history`. Without it, `/history` answers 503 and the real-time routes work as before.
+
 ## API
+
+**Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
+
+Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| GET | `/history/meta` | Coverage per sensor, biomes, harmonization method and status, model scores, known data gaps, limits |
+| POST | `/history/areas` | `{"geometry": <GeoJSON Polygon/MultiPolygon>}` → `area_id`, cells, bbox, biome shares |
+| GET | `/history/calendar?start&end&granularity=day\|week\|month` | Fire cell-days per bucket: harmonized (with interval and source), MODIS, VIIRS, provisional flag |
+| GET | `/history/climatology?series&granularity=week\|month` | Normal year over complete base years (default 2003 to last complete year): median, 10th/90th percentiles, mean |
+| GET | `/history/anomaly?start&end&series` | The period against the same calendar dates in every other base year: percentile, class below/normal/above/record |
+| GET | `/history/season?year&series` | Season start (10%), peak and end (90%) weeks, against the normal season |
+| GET | `/history/trend?series&start_year&end_year` | Yearly totals and Theil–Sen slope with 95% CI |
+| GET | `/history/map?start&end` | Fire cell-days per 0.1° cell with fire |
+
+The API never runs a model: it sums the serving table with DuckDB (about 0.1 s for a season, about 1 s for 23 years of a biome). Today MODIS still delivers data, so the harmonized series equals MODIS (source `modis`, interval of zero width); the VIIRS estimate is served after MODIS ends or after `pipeline.serving --switch-date`. Its interval is the monthly per-biome 90% band weighted by the area's biome shares, an approximation that is too narrow for small areas.
+
+Real-time and forecast routes:
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -142,6 +162,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FORECAST_REFRESH_HOURS` | `6` | How often the base forecast is recomputed (needs `FIRMS_MAP_KEY`) |
 | `FORECAST_ANCHOR_HOURS` | `12` | How recent a live fire must be to anchor the forecast |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins |
+| `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 
 ## Project layout
 
@@ -149,7 +170,10 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 app/
   main.py            FastAPI app, CORS, worker lifecycle
   config.py          settings
-  api/               HTTP routes (system, live, forecast)
+  api/               HTTP routes (system, live, history, forecast)
+  history/
+    store.py         serving table access (DuckDB), areas (bbox, biome, drawn polygon)
+    analytics.py     calendar buckets, normal year, anomaly, season, trend
   realtime/
     firms.py         NASA FIRMS reader
     goes.py          GOES ABI fire product reader + fixed-grid projection
@@ -159,11 +183,171 @@ app/
     worker.py        polling loop
   fusion/fuse.py     multi-sensor fusion
   forecast/          fire forecast: ONNX model, FIRMS history, GOES anchor
+pipeline/            historical batch pipeline (needs the [science] extra)
+  ingest.py          FIRMS archive zips -> Parquet detections table
+  cube.py            detections -> fire-day cube (0.1° cell x UTC day x satellite)
+  viewer.py          cube -> self-contained HTML viewer (dev tool), template in viewer_template.html
+  training.py        cube -> training table for the VIIRS -> MODIS calibration, one per VIIRS satellite
+  baselines.py       naive, ratio and LightGBM calibration, evaluated on the held-out years
+  biomes.py          label each 0.1° cell with its IBGE biome (also clips the national cube to Brazil)
+  crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
+  harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
+  figures.py         validation figures (docs/figures/)
+  serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
+docs/api/openapi.yaml  API contract with the frontend
 models/             trained forecast model (ONNX, climatology, mask, model card)
 notebooks/          Colab notebooks (fire forecast model)
 scripts/            one-off data scripts (persistence table)
 tests/
 ```
+
+## Historical pipeline
+
+The batch side reads the FIRMS archive and never runs inside the API.
+
+```bash
+pip install -e ".[dev,science]"
+# put the FIRMS archive zips in data/raw/firms/<region>/, e.g. data/raw/firms/pantanal/
+python -m pipeline.ingest pantanal
+```
+
+`ingest` writes `data/processed/<region>/detections/year=YYYY/*.parquet` and `ingest_report.json` (rows read, dropped and kept per source). By default it:
+
+- keeps confidence classes nominal and high for both sensors (MODIS 30–100, VIIRS `n`/`h`); `--min-confidence-class l` keeps everything;
+- drops static land sources using one mask for every sensor: points within ~1 km of a location VIIRS labels as volcano or static source (FIRMS `type` 1 or 2). MODIS type 2 labels are not used for the mask because in the Pantanal they are scattered and peak in the fire season, like vegetation fires;
+- keeps FIRMS `type` 3 ("offshore"): in the Pantanal these are fires over the seasonal wetland water mask.
+
+```bash
+python -m pipeline.cube pantanal
+```
+
+`cube` writes `data/processed/<region>/cube/year=YYYY/*.parquet` and `cube_report.json`. One row per 0.1° cell, UTC day and satellite (Terra, Aqua, SNPP, N20, N21) with at least one detection, so every row is a fire-day. Columns: `cell_id`, cell centre, `date`, `sensor`, `satellite`, `fire_day`, `n_pixels`, `n_overpasses`, `n_day`, `n_night`, `n_high`, `n_type2`, `frp_sum_mw`, `frp_max_mw`, `scan_mean_km`, `nrt`. Sensors are combined with OR on the cell-day, never summed. The report lists fire cell-days per year for MODIS, VIIRS, both and either, and P(MODIS | VIIRS).
+
+The cube keeps each VIIRS satellite apart on purpose: in the Pantanal, P(MODIS | any VIIRS) drops from about 0.37 to 0.26 when NOAA-20 joins in 2018, while P(MODIS | S-NPP) shows no break. The drop comes from the growing VIIRS constellation, not from MODIS.
+
+The cube is not yet clipped to land or to a country: the region box also covers sea and neighbouring countries.
+
+To look at a cube (a development tool, not the product frontend):
+
+```bash
+python -m pipeline.viewer pantanal              # data/processed/pantanal/viewer.html, ~2 MB
+python -m pipeline.viewer brazil --factor 10    # national cube needs coarser 1° cells, or --bbox
+python -m http.server 8765 --directory data/processed   # then open http://localhost:8765/pantanal/viewer.html
+```
+
+The page shows MODIS and VIIRS fire-days side by side on a map for any year and month, a burning activity calendar (years × weeks) and the selected year against the 10th–90th percentile of the other years, for the whole region, one clicked cell or a drawn box. All counts are computed in the browser from the cube's fire cell-days.
+
+```bash
+python -m pipeline.training pantanal --satellite SNPP   # train 2012–2017, test 2018+
+python -m pipeline.training pantanal --satellite N20    # train 2018–2022, test 2023+
+```
+
+`training` writes `data/processed/<region>/training/<SAT>/year=YYYY/*.parquet` and `<SAT>_report.json`. The target is `modis`: did MODIS (Terra or Aqua) detect fire in the 0.1° cell that UTC day. Decisions:
+
+- **One table per VIIRS satellite.** Summed VIIRS is not stationary: NOAA-20 and NOAA-21 add pixels, so the same fire looks bigger after 2018, and the MODIS rate for a given VIIRS pixel count roughly halves from train to test. For S-NPP alone it is stable (Pantanal, 4–9 S-NPP pixels: P(MODIS) 0.60 in 2012–2017, 0.59 in 2018–2022, 0.57 in 2023–2026). S-NPP ends on 2026-11-02, so the record continues on NOAA-20.
+- **Rows are picked by VIIRS only:** a cell-day is a row when the satellite saw fire in its 3×3 neighbourhood that day or the day before, the same rule that inference will use once MODIS is gone. Features never use MODIS.
+- **Coverage gap:** 74–90% of MODIS fire-days per year fall inside the rows (Pantanal, single satellite). The rest are mostly small, short daytime fires (81% single MODIS pixel, median FRP 15 MW vs 37 MW overall, mostly Terra at ~10:30 local, before the VIIRS ~13:30 pass). No row-based model can recover them; the harmonized totals must correct for this gap (step 8).
+- Only dates where MODIS and the satellite both have standard processing are used; NRT rows are left out.
+
+```bash
+python -m pipeline.baselines pantanal --satellite SNPP
+python -m pipeline.baselines pantanal --satellite N20
+```
+
+`baselines` predicts, for every row, the probability that MODIS saw fire, and writes `report.json`, `lightgbm.txt`, `calibration.json`, `ratio.json` and `test_predictions.parquet` to `data/processed/<region>/models/<SAT>/`. Three approaches on the same test years:
+
+- **naive:** "VIIRS saw fire, so MODIS would have", i.e. no harmonization;
+- **ratio:** share of MODIS fire in the training years per month, for cells with and without their own VIIRS detection;
+- **LightGBM:** all features, positive class weighted by n_negative / n_positive; the weight multiplies the predicted odds, so they are divided back. The last training year is held out: it drives early stopping and fits an isotonic calibration of the probabilities (which makes that year's total match). The trees are not refit on it, so the calibration never sees training data.
+
+The calendar shows totals, so the main metrics are on totals: bias of the summed probabilities against MODIS fire-days, WAPE of monthly regional totals and of cell-month totals. Pantanal box, test years only (MODIS fire-days inside the rows):
+
+| Satellite, test years | Model | Bias | Monthly WAPE | Cell-month WAPE | ROC AUC | Avg. precision |
+|---|---|---|---|---|---|---|
+| S-NPP, 2018–2026 | naive | +103.8% | 103.8% | 114.3% | 0.890 | 0.361 |
+| | ratio | −13.0% | 20.3% | 75.1% | 0.905 | 0.432 |
+| | **LightGBM** | **+3.7%** | **5.6%** | **48.9%** | **0.950** | **0.720** |
+| NOAA-20, 2023–2026 | naive | +98.6% | 98.6% | 107.6% | 0.896 | 0.379 |
+| | ratio | −7.7% | 22.6% | 72.6% | 0.910 | 0.457 |
+| | **LightGBM** | **+0.7%** | **3.8%** | **44.5%** | **0.955** | **0.738** |
+
+Before calibration (trees refit on every training year, no held-out year) LightGBM scored +0.1% / 4.0% for S-NPP and −2.8% / 4.8% for NOAA-20: in the Pantanal box the uncalibrated model was already close, and a one-year calibration also carries that year's noise. Calibration is kept because it fixes the national model (below). Most of the LightGBM gain comes from the fire radiative power seen by VIIRS (`v_frp_sum`, ~70% of the gain): MODIS misses weak fires, and FRP measures how strong a fire is.
+
+**Outside the Pantanal (national cube, S-NPP, test years 2018–2026, Brazil cells only):**
+
+```bash
+python -m pipeline.biomes brazil                      # needs data/raw/ibge/Biomas_250mil.zip
+python -m pipeline.training brazil --satellite SNPP   # ~10 min, 69M rows
+python -m pipeline.crossbiome brazil                  # ~15 min
+```
+
+The national training table is too big for memory, so `crossbiome` trains on every row where S-NPP saw fire plus a fixed 1-in-5 sample of the neighbour-only rows (chosen by a hash of cell and date, weighted 5). Test years use every row. Bias and monthly WAPE of the summed probabilities against MODIS fire-days:
+
+| Biome (coverage) | Naive | LightGBM Brazil, uncalibrated | **LightGBM Brazil, calibrated** | LightGBM from the Pantanal box |
+|---|---|---|---|---|
+| Brazil (82%) | +180% / 180% | −8.7% / 9.8% | **−0.5% / 6.9%** | −48.2% / 48.2% |
+| Amazon (85%) | +166% / 166% | −8.6% / 10.7% | **−0.6% / 7.3%** | −47.6% / 47.6% |
+| Cerrado (81%) | +157% / 157% | −6.1% / 8.3% | **+2.0% / 7.0%** | −48.4% / 48.4% |
+| Atlantic Forest (73%) | +293% / 293% | −9.9% / 11.1% | **+0.2% / 7.9%** | −50.6% / 50.6% |
+| Caatinga (79%) | +246% / 246% | −19.5% / 20.5% | **−10.8% / 14.3%** | −63.1% / 63.1% |
+| Pampa (70%) | +352% / 352% | −22.6% / 25.3% | **−13.2% / 19.5%** | −57.9% / 58.2% |
+| Pantanal (91%) | +85% / 85% | −0.0% / 7.5% | **+6.3% / 9.3%** | +7.2% / 9.8% |
+
+What this shows:
+
+- **No harmonization is much worse nationally** (+180%) than in the Pantanal (+85%): elsewhere fires are smaller, so VIIRS sees many more that MODIS misses.
+- **Calibration fixes the national model.** Uncalibrated, it under-predicted by 8.7%, on its own training years too (−5.2%; −8.1% on the held-out year), so it was a flaw of the weighted model, not a change in MODIS. Calibrated on the held-out year 2017: −0.5% bias, 6.9% monthly error for Brazil, 7–8% in the Amazon, Cerrado and Atlantic Forest.
+- **Still weaker in Caatinga and Pampa** (−11% and −13%, 14–20% monthly error), and the single national calibration now over-predicts the Pantanal biome (+6.3%). Next step: calibrate per biome, on several held-out years instead of one.
+- **A model does not transfer across biomes.** The Pantanal model still ranks cell-days well (ROC AUC 0.83–0.88) but under-predicts every other biome by about half: the same VIIRS signal means a higher chance of a MODIS detection in the Pantanal, where fires are bigger. The harmonization must be trained on the whole country.
+- **The yearly error drifts.** Calibrated national totals go from +6.3% (2018) to −7.1% (2024): about −2 points per year. For a fixed S-NPP signal (2–3 pixels), P(MODIS) rises slightly to 0.26 in 2024 and then falls to 0.22 in 2025 and 0.18 in 2026 (partial year). This matters most for long-term trends: the harmonized trend must carry this uncertainty, and the drift must be checked as the record grows.
+- **Coverage is lowest where fires are small** (Pampa 70%, Atlantic Forest 73%): the gap correction in step 8 matters most there.
+- Cell-month error stays high (43% in the Pantanal biome, 62–117% elsewhere): numbers for small areas need visible uncertainty.
+- Next for the model: the U-Net (step 7) must beat these numbers on the same test years to be used.
+
+### Harmonized record (step 8)
+
+```bash
+python -m pipeline.training brazil --satellite N20     # national NOAA-20 table, ~8 min
+python -m pipeline.harmonize brazil --satellite SNPP   # ~15 min, resumes saved folds
+python -m pipeline.harmonize brazil --satellite N20    # ~7 min
+python -m pipeline.figures brazil                      # docs/figures/*.png
+python -m pipeline.serving brazil                      # the table /history reads, ~20 s
+```
+
+**What the harmonized series is.** MODIS observed while MODIS delivers data. When MODIS ends (or earlier, at a switch date the team may set if MODIS orbital drift makes it unreliable), it becomes the MODIS-equivalent estimate from VIIRS: S-NPP until it ended (2026-11-02), then NOAA-20. The estimate is computed for every day since 2012 anyway, to check that the hand-over has no step.
+
+**How the VIIRS estimate is built** (`pipeline/harmonize.py`):
+
+1. **Cross-fitting by year blocks** (S-NPP: 2012–14, 2015–17, 2018–20, 2021–23, 2024–26; NOAA-20: 2018–19, 2020–21, 2022–23, 2024–26). Each block is predicted by a LightGBM trained on the other blocks only, so every year of the overlap gets an out-of-sample estimate.
+2. **Calibration per biome** (isotonic, on the out-of-fold probabilities).
+3. **Coverage gap**: per biome and calendar month, g = all MODIS fire-days / MODIS fire-days inside the rows; each probability is multiplied by g. An area's estimate is Σ p × g, an expected count of MODIS fire cell-days (not an integer).
+4. **90% interval** per biome from the 5th/95th percentiles of the relative error of monthly totals. It is calibrated at the biome-month scale: it is not valid for yearly totals (errors partly cancel across months) nor for small areas (larger). Scale-aware intervals are left for the analytics step.
+
+Outputs in `data/processed/brazil/harmonized/`: one row per cell-day with the observed MODIS flag and the estimate (`<SAT>/year=YYYY/`), monthly series per biome with interval (`<SAT>_monthly.parquet`), and calibrators, gap factors and scores (`<SAT>_model.json`).
+
+Out-of-fold scores (S-NPP 2012-01-20 to 2026-07-31; NOAA-20 2018-04-01 to 2026-07-31). The whole-period bias is about 0 by construction (calibration and gap are fitted on these same rows), so the monthly error is the number to read:
+
+| Area | Monthly WAPE, S-NPP | Monthly WAPE, NOAA-20 | Naive VIIRS (bias) | 90% band, monthly (S-NPP) |
+|---|---|---|---|---|
+| Brazil | 6.9% | 7.6% | +137% | — |
+| Amazon | 7.3% | 8.1% | +134% | −18% / +48% |
+| Cerrado | 7.5% | 8.6% | +112% | −23% / +57% |
+| Atlantic Forest | 9.7% | 9.7% | +194% | −18% / +44% |
+| Pantanal | 11.3% | 10.1% | +76% | −21% / +48% |
+| Pampa | 14.5% | 15.7% | +230% | −28% / +46% |
+| Caatinga | 15.8% | 19.1% | +188% | −30% / +41% |
+
+![Pantanal biome, 2020](docs/figures/pantanal_2020.png)
+
+![Brazil, fire cell-days per year](docs/figures/brazil_annual.png)
+
+What this shows and what is still open:
+
+- **The 2012 step is gone.** The naive record (MODIS, then VIIRS) more than doubles in 2012; the MODIS-equivalent estimate follows MODIS year by year. Pantanal 2020, from models that never saw 2020: the S-NPP estimate is within ±23% of MODIS every month (+8% to +10% at the August–September peak) and NOAA-20 tracks it closely, while S-NPP as seen is 29% to 112% above MODIS depending on the month.
+- **The estimate drifts low in recent years**, with both satellites independently: S-NPP from +1% to +5% (2012–2021) to −3% (2022), −6% (2023), −10% (2024) and −14% (2025); NOAA-20 −5%, −6%, −13% in 2023–2025. Two independent VIIRS satellites agreeing points to a change on the MODIS side or in the fires, not in one VIIRS sensor. For a fixed S-NPP signal, Terra's detection rate rises in 2023–2024 and Aqua's falls in 2025–2026, so the cause is not settled (MODIS orbital drift is the first suspect). Consequence: switching to the VIIRS estimate today would put a step of about −10% at the hand-over. Options: anchor the calibration to the most recent overlap years before switching, and carry this drift in the uncertainty of long-term trends.
+- Per-cell values remain much less certain than area totals; the gap of small fires is spread over cells where VIIRS saw activity.
+
+`data/` is not committed.
 
 ## Data sources
 
@@ -178,6 +362,24 @@ Every dataset this project reads, with its citation.
 - **MODIS Collection 6.1 active fire, NRT** (`MCD14DL`, source `MODIS_NRT`), Terra and Aqua, 1 km. https://doi.org/10.5067/FIRMS/MODIS/MCD14DL.NRT.0061
 - **FIRMS yearly country archive**, used to train the forecast model: VIIRS S-NPP 2012–2025 and MODIS C6.1 2000–2016. Brazil `https://firms.modaps.eosdis.nasa.gov/data/country/{viirs-snpp|modis}/{year}/{sensor}_{year}_Brazil.csv` and all countries `https://firms.modaps.eosdis.nasa.gov/data/country/zips/{sensor}_{year}_all_countries.zip`
 - FIRMS FAQ (attribute meanings, e.g. `scan`/`track` pixel sizes): https://www.earthdata.nasa.gov/data/tools/firms/faq
+
+Historical record (pipeline), from the FIRMS archive download (https://firms.modaps.eosdis.nasa.gov/download/), CSV, one request per sensor:
+
+- **MODIS Collection 6.1 standard active fire locations** (`MCD14ML`, file `fire_archive_M-C61_*`), Terra (from 2000-11-01) and Aqua (from 2002-07-04), processed by the University of Maryland with a ~3-month lag and distributed by FIRMS.
+- **VIIRS 375 m standard active fire product, Collection 2**: S-NPP (`VNP14IMGTML`, file `fire_archive_SV-C2_*`, from 2012-01-20), NOAA-20 (file `fire_archive_J1V-C2_*`, from 2018-04-01) and NOAA-21 (file `fire_archive_J2V-C2_*`, from 2023-03-01), processed by the University of Maryland and distributed by FIRMS.
+- The months the standard archive has not reached yet come in the same download as NRT files (`fire_nrt_*`, the NRT products listed above) and are flagged `processing = NRT`.
+- Product names and the known MODIS archive gaps (late June to early July 2001, parts of 2002, mid-August 2007, 21–22 April 2009) are from the FIRMS download Readme: https://firms.modaps.eosdis.nasa.gov/download/Readme.txt
+- Attribute fields (including `type`: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore): https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs
+- Pilot area: box west −60, south −22.5, east −54.5, north −15 (Pantanal), 2000-11-01 to 2026-11-14.
+- National area: box west −74.5, south −34.5, east −28.5, north 6 (Brazil and surroundings), same dates (requests 848644–848647).
+
+### IBGE biomes
+
+- **Biomas do Brasil 2019, 1:250,000** (`Biomas_250mil.zip`, 15.0 MB), Instituto Brasileiro de Geografia e Estatística (IBGE): https://geoftp.ibge.gov.br/informacoes_ambientais/estudos_ambientais/biomas/vetores/ . Used to label every 0.1° cell with its biome (cell centre inside the biome) and to keep only Brazil cells in the national evaluation. Coordinates in SIRGAS 2000, used as WGS84 (difference about a metre).
+
+### Basemap (cube viewer only)
+
+- OpenStreetMap standard tiles, © OpenStreetMap contributors, data under the Open Database License (ODbL): https://www.openstreetmap.org/copyright. Used lightly for a development viewer, following the tile usage policy: https://operations.osmfoundation.org/policies/tiles/
 
 We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's Earth Science Data and Information System (ESDIS), with funding provided by NASA Headquarters.
 
@@ -218,7 +420,14 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | xarray, ONNX, onnxscript, Requests | Apache-2.0 |
 | Zarr | MIT |
 | s3fs, fsspec | BSD-3-Clause |
+| DuckDB (API and pipeline), LightGBM (pipeline) | MIT |
+| PyArrow (pipeline) | Apache-2.0 |
+| Shapely (biome labels) | BSD-3-Clause |
+| pyshp (reads the IBGE shapefile) | MIT |
+| openapi-spec-validator (contract tests) | Apache-2.0 |
+| jsonschema (contract tests) | MIT |
 | Matplotlib | Matplotlib License (PSF-based) |
+| Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |
 
 The forecast notebook runs on Google Colab (hosted Jupyter runtime).
