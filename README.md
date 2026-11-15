@@ -95,7 +95,7 @@ A hotspot is the centre of a satellite pixel, so the fire lies somewhere inside 
 1. **Cluster.** Two detections belong to the same fire when they are within `FUSION_RADIUS_KM` plus half of each pixel's larger side, and within `FUSION_WINDOW_HOURS` of each other.
 2. **Position.** Inverse-variance weighted centroid: a point spread uniformly over a pixel of size scan × track has variance (scan² + track²) / 12, so one VIIRS pixel outweighs a GOES pixel about 30 to 1. Each weight is also scaled by the detection's confidence.
 3. **Uncertainty.** Twice the larger of the combined pixel error and the weighted spread of the detections.
-4. **Confidence.** 1 − ∏(1 − best confidence per sensor): independent sensors that agree raise confidence.
+4. **Confidence.** 1 − ∏(1 − best confidence per sensor): sensors that agree raise confidence. This is a heuristic score for ranking fires, not a probability: the formula would be exact only if each sensor's confidence were a calibrated probability and the sensors erred independently, and neither holds (FIRMS confidence classes are not calibrated, and sensors share causes of error such as sun glint and hot bare soil).
 
 The gain in position comes mainly from VIIRS. The main gains from fusion are earlier detection (GOES) and higher confidence (agreement).
 
