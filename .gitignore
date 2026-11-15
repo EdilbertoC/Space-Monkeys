@@ -20,3 +20,4 @@ data/tmp/
 .ruff_cache/
 work/
 notebooks/work/
+history_data/

@@ -18,7 +18,8 @@ inside that pixel. Different sensors see the same fire with very different pixel
    error and the weighted spread of the detections (a big fire covers many pixels,
    so the spread dominates there).
 4. Combines confidence across sensor families: 1 - prod(1 - best confidence per
-   sensor). Agreement between independent sensors raises confidence.
+   sensor). Agreement between sensors raises confidence. This is a heuristic score,
+   not a probability: sensor confidences are neither calibrated nor independent.
 """
 
 import numpy as np

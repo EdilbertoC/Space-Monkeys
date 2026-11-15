@@ -5,6 +5,7 @@ API: https://firms.modaps.eosdis.nasa.gov/api/area/
 URL: /api/area/csv/{MAP_KEY}/{SOURCE}/{west,south,east,north}/{DAY_RANGE}
 """
 
+import asyncio
 import io
 import logging
 from datetime import date
@@ -17,6 +18,7 @@ from app.realtime import detections
 log = logging.getLogger(__name__)
 
 FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+RETRY_DELAYS = (3, 10, 30)  # seconds between attempts on server or network errors
 
 # VIIRS reports a class; MODIS reports 0-100.
 VIIRS_CONFIDENCE = {"l": 0.3, "low": 0.3, "n": 0.6, "nominal": 0.6, "h": 0.9, "high": 0.9}
@@ -84,14 +86,30 @@ async def fetch_source(
     day_range: int = 1,
     start: date | None = None,
 ) -> pd.DataFrame:
-    """Detections for `day_range` days: the most recent ones, or from `start` onward."""
+    """Detections for `day_range` days: the most recent ones, or from `start` onward.
+
+    Server errors (5xx) and network failures are retried. Errors raised from here never
+    contain the map key, which is part of the URL.
+    """
     area = ",".join(f"{v:g}" for v in bbox)
-    url = f"{FIRMS_AREA_URL}/{map_key}/{source}/{area}/{day_range}"
-    if start is not None:
-        url += f"/{start.isoformat()}"
-    response = await client.get(url, timeout=60)
-    response.raise_for_status()
-    return parse_csv(response.text, source)
+    path = f"{source}/{area}/{day_range}" + (f"/{start.isoformat()}" if start else "")
+    url = f"{FIRMS_AREA_URL}/{map_key}/{path}"
+    for attempt, delay in enumerate((*RETRY_DELAYS, None), start=1):
+        try:
+            response = await client.get(url, timeout=60)
+        except httpx.HTTPError as exc:
+            problem = f"network error ({type(exc).__name__})"
+        else:
+            if response.status_code < 400:
+                return parse_csv(response.text, source)
+            problem = f"HTTP {response.status_code}"
+            if response.status_code < 500:  # a client error will not fix itself
+                break
+        if delay is None:
+            break
+        log.info("FIRMS %s: %s, retry %d in %ss", path, problem, attempt, delay)
+        await asyncio.sleep(delay)
+    raise FirmsError(f"FIRMS {path}: {problem}")
 
 
 async def fetch_all(

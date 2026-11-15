@@ -49,7 +49,29 @@ docker run -p 8000:8000 --env-file .env space-monkeys-back
 
 The `/history` routes read a folder built by the pipeline (`python -m pipeline.serving brazil`, see "Historical pipeline"); it is not in the image. Mount it and point `HISTORY_DATA_DIR` at it, for example `-v $PWD/data/processed/brazil/serving:/srv/history -e HISTORY_DATA_DIR=/srv/history`. Without it, `/history` answers 503 and the real-time routes work as before.
 
+## Deploy on Discloud
+
+The API runs on CPU only: a 7-day forecast for Brazil takes about 0.1 s and the server peaks around 400–600 MB, so no GPU is needed. Files: [`discloud.config`](discloud.config) (site `orbitburn.discloud.app`, port 8080, 1 GB RAM, Python 3.11: Discloud's `latest` is Python 3.15, for which onnxruntime has no wheels yet), [`requirements.txt`](requirements.txt) and [`.discloudignore`](.discloudignore), which leaves out the pipeline, notebooks, tests and `data/`. These three files are SI-assisted (see below); `discloud.config` and `.discloudignore` carry no header line because their comment syntax is not documented.
+
+Before zipping the project for upload:
+
+1. Copy the calendar data built by the pipeline into the project root: `data/processed/brazil/serving` → `history_data/` (only `meta.json`, `cell_day/` and `cell_biome.parquet` are read).
+2. Create `.env` in the project root (it is uploaded to Discloud, never committed):
+
+   ```
+   FIRMS_MAP_KEY=<your key>
+   HISTORY_DATA_DIR=history_data
+   ```
+
+3. Upload the zip on Discloud (a site needs the Platinum plan or higher). Check `https://orbitburn.discloud.app/health` and `/docs`.
+
+Run a single uvicorn process (the `START` line does): the live pulse and the forecast live in that process's memory.
+
 ## API
+
+For people, `/docs` shows the hand-written contract ([`docs/api/openapi.yaml`](docs/api/openapi.yaml)) with units, conventions, real examples and "Try it out" against the server; `/redoc` shows the same as a reading page. FastAPI's generated schema stays at `/openapi.json`.
+
+For language models and AI agents, [`llms.txt`](llms.txt) explains every route, unit and rule in plain language ([llmstxt.org](https://llmstxt.org/) format). The server also serves it at `/llms.txt`. The full contract is [`docs/api/openapi.yaml`](docs/api/openapi.yaml).
 
 **Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
 
@@ -97,7 +119,7 @@ A hotspot is the centre of a satellite pixel, so the fire lies somewhere inside 
 1. **Cluster.** Two detections belong to the same fire when they are within `FUSION_RADIUS_KM` plus half of each pixel's larger side, and within `FUSION_WINDOW_HOURS` of each other.
 2. **Position.** Inverse-variance weighted centroid: a point spread uniformly over a pixel of size scan × track has variance (scan² + track²) / 12, so one VIIRS pixel outweighs a GOES pixel about 30 to 1. Each weight is also scaled by the detection's confidence.
 3. **Uncertainty.** Twice the larger of the combined pixel error and the weighted spread of the detections.
-4. **Confidence.** 1 − ∏(1 − best confidence per sensor): independent sensors that agree raise confidence.
+4. **Confidence.** 1 − ∏(1 − best confidence per sensor): sensors that agree raise confidence. This is a heuristic score for ranking fires, not a probability: the formula would be exact only if each sensor's confidence were a calibrated probability and the sensors erred independently, and neither holds (FIRMS confidence classes are not calibrated, and sensors share causes of error such as sun glint and hot bare soil).
 
 The gain in position comes mainly from VIIRS. The main gains from fusion are earlier detection (GOES) and higher confidence (agreement).
 
@@ -132,11 +154,14 @@ The backend serves the Brazil model from [`models/fire_forecast_brazil/`](models
 | Persistence | 0.154 | 0.0497 |
 | **U-Net (Brazil, VIIRS)** | **0.396** | **0.0434** |
 | U-Net (world + MODIS) | 0.379 | 0.0438 |
+| U-Net (Brazil + MODIS + rich inputs + weather, ensemble of 3) | 0.402 | 0.0428 |
+
+The last row is an experiment, not the served model. Adding MODIS history, FRP, night-time detections, weather up to the forecast day and a 3-model ensemble moved average precision from 0.396 to 0.402, which is within the run-to-run variation of one model (about 0.005–0.01). With 11 years of training data the count-only model already captures most of what these inputs add. The served model stays the simpler one. What the model lacks is information about the coming days: a short test that fed the observed weather of the target days (`FUTURE_WEATHER`, a perfect weather forecast) showed a much larger gain, but it has not been run at full scale and needs a weather-forecast feed (NOAA GFS) to be usable.
 
 How a forecast is made:
 
-1. **Base forecast** (every `FORECAST_REFRESH_HOURS`): the last 30 days of VIIRS S-NPP NRT detections from FIRMS are gridded exactly like the training data and fed to the U-Net. It is issued for the last complete UTC day, so lead 1 is today.
-2. **GOES real-time anchor** (every pulse): a cell with a live fused fire seen today is raised to at least *confidence × P(fire persists j days)* for today and the following days. The persistence probabilities were measured on the training years ([`scripts/persistence_table.py`](scripts/persistence_table.py)). The anchor never lowers the model's forecast and is never fed into the network, which never saw GOES data. Anchored cells are flagged `anchored: true`.
+1. **Base forecast** (every `FORECAST_REFRESH_HOURS`): the last 30 days of VIIRS NRT detections from FIRMS are gridded exactly like the training data and fed to the U-Net. The model was trained on S-NPP, which stopped delivering data on 2026-11-02; the input now comes from VIIRS on NOAA-20 (`FORECAST_SOURCE`, default `VIIRS_NOAA20_NRT`): the same instrument and algorithm, one satellite at a time as in training. Its detection rate per satellite is close to S-NPP's, but the model has not been re-scored on NOAA-20 input. It is issued for the last complete UTC day, so lead 1 is today.
+2. **GOES real-time anchor** (every pulse): a cell with a live fused fire seen today is raised to at least *min(confidence, 0.95) × P(fire persists j days)* for today and the following days. The persistence probabilities were measured on the training years ([`scripts/persistence_table.py`](scripts/persistence_table.py)). The anchor never lowers the model's forecast and is never fed into the network, which never saw GOES data. Anchored cells are flagged `anchored: true`.
 
 The NRT feed has no `type` column, so non-vegetation static heat sources cannot be removed at forecast time; the forecast mask limits the model to cells that burned during training.
 
@@ -164,7 +189,8 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FORECAST_MODEL_DIR` | `models/fire_forecast_brazil` | Folder with `model.onnx`, `climatology.npy`, `mask.npy`, `meta.json` |
 | `FORECAST_REFRESH_HOURS` | `6` | How often the base forecast is recomputed (needs `FIRMS_MAP_KEY`) |
 | `FORECAST_ANCHOR_HOURS` | `12` | How recent a live fire must be to anchor the forecast |
-| `CORS_ORIGINS` | `http://localhost:5173,http://localhost:8443` | Comma-separated frontend origins |
+| `FORECAST_SOURCE` | `VIIRS_NOAA20_NRT` | FIRMS NRT source fed to the forecast model (S-NPP ended 2026-11-02) |
+| `CORS_ORIGINS` | `*` | Origins allowed to call the API from a browser; `*` = any (the API is public, read-only and uses no cookies). Comma-separated list to restrict |
 | `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 
 ## Project layout

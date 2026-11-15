@@ -48,7 +48,7 @@ info:
       no fire-risk index, hotspot counts or FRP.
     - **Sensors**: the historical record uses MODIS (Terra, Aqua) and VIIRS (S-NPP,
       NOAA-20, NOAA-21) from NASA FIRMS. The forecast model is trained on VIIRS
-      S-NPP and fed with VIIRS S-NPP NRT. GOES ABI is used only by the real-time
+      S-NPP and fed with VIIRS NOAA-20 NRT (S-NPP ended on 2026-11-02). GOES ABI is used only by the real-time
       routes (`live`) and to anchor the forecast on fires burning now. Landsat and
       Sentinel-3 SLSTR are not used.
     - **Dates** are ISO 8601 UTC days. Periods are inclusive of `start` and `end`.
@@ -533,7 +533,7 @@ paths:
       operationId: getForecast
       summary: Probability of fire per 0.25° cell for the next 7 days (lead 1 = today)
       description: |
-        Base forecast: a U-Net turns the last 30 days of VIIRS S-NPP NRT fire maps
+        Base forecast: a U-Net turns the last 30 days of VIIRS NOAA-20 NRT fire maps
         into, for every 0.25° cell of Brazil, the probability of at least one VIIRS
         fire detection on each of the next 7 days. It is issued for the last complete
         UTC day (`issued_for`), so `valid_dates[0]` is today. Recomputed every

@@ -1,0 +1,16 @@
+# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
+# Runtime dependencies of the API, for hosts that install from requirements.txt
+# (Discloud). Keep in sync with [project] dependencies in pyproject.toml.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+pydantic-settings>=2.4
+numpy>=1.26
+pandas>=2.2
+scipy>=1.13
+xarray>=2024.6
+h5netcdf>=1.3
+h5py>=3.11
+duckdb>=1.1
+onnxruntime>=1.18
+pyyaml>=6.0
