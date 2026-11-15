@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     forecast_model_dir: str = "models/fire_forecast_brazil"
     forecast_refresh_hours: float = Field(default=6.0, gt=0)
     forecast_anchor_hours: float = Field(default=12.0, gt=0)
+    # FIRMS NRT source fed to the model (S-NPP, the training satellite, ended 2026-11-02)
+    forecast_source: str = "VIIRS_NOAA20_NRT"
 
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(

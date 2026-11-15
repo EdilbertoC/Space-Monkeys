@@ -1,5 +1,10 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
-"""Recent daily fire maps for the forecast, from NASA FIRMS VIIRS S-NPP NRT.
+"""Recent daily fire maps for the forecast, from NASA FIRMS VIIRS NRT.
+
+The model was trained on VIIRS S-NPP. S-NPP stopped delivering data on 2026-11-02,
+so the input now comes from VIIRS on NOAA-20: the same instrument, resolution and
+detection algorithm on a satellite in the same orbit, one satellite at a time as in
+training (several VIIRS satellites summed would inflate the counts).
 
 The model was trained on daily counts of VIIRS S-NPP fire pixels (nominal/high
 confidence) per cell, by acquisition date (UTC). The NRT feed has no `type` column, so
@@ -16,7 +21,7 @@ import pandas as pd
 from app.forecast.model import Grid
 from app.realtime import firms
 
-SOURCE = "VIIRS_SNPP_NRT"
+DEFAULT_SOURCE = "VIIRS_NOAA20_NRT"
 MIN_CONFIDENCE = 0.6  # "nominal" and "high" in the FIRMS reader's 0..1 scale
 MAX_DAYS_PER_REQUEST = 5
 
@@ -37,7 +42,12 @@ def grid_counts(detections: pd.DataFrame, grid: Grid, first_day: date, n_days: i
 
 
 async def fetch_daily_counts(
-    client: httpx.AsyncClient, map_key: str, grid: Grid, last_day: date, n_days: int
+    client: httpx.AsyncClient,
+    map_key: str,
+    grid: Grid,
+    last_day: date,
+    n_days: int,
+    source: str = DEFAULT_SOURCE,
 ) -> tuple[np.ndarray, list[int]]:
     """Daily counts for last_day - n_days + 1 … last_day, and detections per day."""
     first_day = last_day - timedelta(days=n_days - 1)
@@ -47,7 +57,7 @@ async def fetch_daily_counts(
         span = min(MAX_DAYS_PER_REQUEST, n_days - offset)
         start = first_day + timedelta(days=offset)
         frames.append(
-            await firms.fetch_source(client, map_key, SOURCE, grid.bbox, span, start=start)
+            await firms.fetch_source(client, map_key, source, grid.bbox, span, start=start)
         )
         offset += span
     frames = [f for f in frames if not f.empty]

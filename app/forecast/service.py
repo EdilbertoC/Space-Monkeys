@@ -19,7 +19,7 @@ import httpx
 import numpy as np
 import pandas as pd
 
-from app.forecast.history import fetch_daily_counts
+from app.forecast.history import DEFAULT_SOURCE, fetch_daily_counts
 from app.forecast.model import ForecastModel
 
 log = logging.getLogger(__name__)
@@ -45,8 +45,11 @@ class Forecast:
 
 
 class ForecastService:
-    def __init__(self, model: ForecastModel, anchor_hours: float = 12.0) -> None:
+    def __init__(
+        self, model: ForecastModel, anchor_hours: float = 12.0, source: str = DEFAULT_SOURCE
+    ) -> None:
         self.model = model
+        self.source = source  # FIRMS NRT source that feeds the model
         self.anchor_hours = anchor_hours
         lags = model.meta["persistence"]["p_fire_after_lag_days_given_fire"]
         # persistence[j] = P(fire j days after a fire), j = 0 … leads-1; j = 0 is 1.

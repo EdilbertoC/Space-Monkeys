@@ -40,7 +40,7 @@ Errors: 400 area missing or ambiguous, 404 unknown `area_id`, 409 harmonized ser
 - `GET /forecast?min_p=0.05&bbox=w,s,e,n`: probability of at least one VIIRS fire detection per 0.25° cell for each of the next 7 days. Lead 1 is today. Returns `issued_for` (last day of observed data), `valid_dates` (7 dates), `generated_at`, `anchored_at`, `resolution_deg`, `model`, and `cells: [{lat, lon, p: [7 probabilities], anchored}]`, only cells whose highest probability reaches `min_p`. `anchored: true` means a fire burning now (seen by GOES or FIRMS in the last hours) raised that cell above the model's own forecast. 503 until the first forecast is issued (it needs the server's FIRMS key).
 - `GET /forecast/model`: model card. Data used, inputs, test scores on Brazil 2024–2025 (`test_avg_precision`, `test_brier`, compared with climatology and persistence) and `status`.
 
-The model is a U-Net trained on the NASA FIRMS VIIRS S-NPP archive (2012–2022). On the 2024–2025 test it reached average precision 0.396 versus 0.303 for climatology. It forecasts fires that keep burning much better than new ignitions. Present its output as a probability, never as certainty.
+The model is a U-Net trained on the NASA FIRMS VIIRS S-NPP archive (2012–2022); since S-NPP ended (2026-11-02) it is fed with VIIRS NOAA-20 near-real-time detections. On the 2024–2025 test it reached average precision 0.396 versus 0.303 for climatology. It forecasts fires that keep burning much better than new ignitions. Present its output as a probability, never as certainty.
 
 ## Live: real-time fires
 

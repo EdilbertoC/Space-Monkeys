@@ -159,7 +159,7 @@ The last row is an experiment, not the served model. Adding MODIS history, FRP, 
 
 How a forecast is made:
 
-1. **Base forecast** (every `FORECAST_REFRESH_HOURS`): the last 30 days of VIIRS S-NPP NRT detections from FIRMS are gridded exactly like the training data and fed to the U-Net. It is issued for the last complete UTC day, so lead 1 is today.
+1. **Base forecast** (every `FORECAST_REFRESH_HOURS`): the last 30 days of VIIRS NRT detections from FIRMS are gridded exactly like the training data and fed to the U-Net. The model was trained on S-NPP, which stopped delivering data on 2026-11-02; the input now comes from VIIRS on NOAA-20 (`FORECAST_SOURCE`, default `VIIRS_NOAA20_NRT`): the same instrument and algorithm, one satellite at a time as in training. Its detection rate per satellite is close to S-NPP's, but the model has not been re-scored on NOAA-20 input. It is issued for the last complete UTC day, so lead 1 is today.
 2. **GOES real-time anchor** (every pulse): a cell with a live fused fire seen today is raised to at least *confidence × P(fire persists j days)* for today and the following days. The persistence probabilities were measured on the training years ([`scripts/persistence_table.py`](scripts/persistence_table.py)). The anchor never lowers the model's forecast and is never fed into the network, which never saw GOES data. Anchored cells are flagged `anchored: true`.
 
 The NRT feed has no `type` column, so non-vegetation static heat sources cannot be removed at forecast time; the forecast mask limits the model to cells that burned during training.
@@ -188,6 +188,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FORECAST_MODEL_DIR` | `models/fire_forecast_brazil` | Folder with `model.onnx`, `climatology.npy`, `mask.npy`, `meta.json` |
 | `FORECAST_REFRESH_HOURS` | `6` | How often the base forecast is recomputed (needs `FIRMS_MAP_KEY`) |
 | `FORECAST_ANCHOR_HOURS` | `12` | How recent a live fire must be to anchor the forecast |
+| `FORECAST_SOURCE` | `VIIRS_NOAA20_NRT` | FIRMS NRT source fed to the forecast model (S-NPP ended 2026-11-02) |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins |
 | `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 

@@ -37,7 +37,11 @@ async def lifespan(app: FastAPI):
     app.state.forecast = None
     if settings.enable_forecast:
         model = ForecastModel(Path(settings.forecast_model_dir))
-        app.state.forecast = ForecastService(model, anchor_hours=settings.forecast_anchor_hours)
+        app.state.forecast = ForecastService(
+            model,
+            anchor_hours=settings.forecast_anchor_hours,
+            source=settings.forecast_source,
+        )
     app.state.worker = None
     if settings.enable_worker:
         app.state.worker = RealtimeWorker(
