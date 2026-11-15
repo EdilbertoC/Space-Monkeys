@@ -164,7 +164,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FORECAST_MODEL_DIR` | `models/fire_forecast_brazil` | Folder with `model.onnx`, `climatology.npy`, `mask.npy`, `meta.json` |
 | `FORECAST_REFRESH_HOURS` | `6` | How often the base forecast is recomputed (needs `FIRMS_MAP_KEY`) |
 | `FORECAST_ANCHOR_HOURS` | `12` | How recent a live fire must be to anchor the forecast |
-| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins |
+| `CORS_ORIGINS` | `http://localhost:5173,http://localhost:8443` | Comma-separated frontend origins |
 | `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 
 ## Project layout
