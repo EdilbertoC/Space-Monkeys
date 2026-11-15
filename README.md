@@ -186,6 +186,7 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   baselines.py       naive, ratio and LightGBM calibration, evaluated on the held-out years
   biomes.py          label each 0.1° cell with its IBGE biome (also clips the national cube to Brazil)
   crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
+  unet.py            U-Net calibration (step 7), scored against LightGBM on the same rows
   harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
   figures.py         validation figures (docs/figures/)
   serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
@@ -297,7 +298,36 @@ What this shows:
 - **The yearly error drifts.** Calibrated national totals go from +6.3% (2018) to −7.1% (2024): about −2 points per year. For a fixed S-NPP signal (2–3 pixels), P(MODIS) rises slightly to 0.26 in 2024 and then falls to 0.22 in 2025 and 0.18 in 2026 (partial year). This matters most for long-term trends: the harmonized trend must carry this uncertainty, and the drift must be checked as the record grows.
 - **Coverage is lowest where fires are small** (Pampa 70%, Atlantic Forest 73%): the gap correction in step 8 matters most there.
 - Cell-month error stays high (43% in the Pantanal biome, 62–117% elsewhere): numbers for small areas need visible uncertainty.
-- Next for the model: the U-Net (step 7) must beat these numbers on the same test years to be used.
+### U-Net calibration (step 7)
+
+```bash
+python -m pipeline.unet brazil   # S-NPP; ~1 h on a 6 GB laptop GPU (RTX 4050), CUDA build of PyTorch
+```
+
+`pipeline/unet.py` answers the same question as LightGBM, from the same information, so the comparison is architecture against architecture:
+
+- **Inputs:** the whole Brazil grid as an image (416 × 464 cells at 0.1°). For each of the days t−3..t, eight channels from the S-NPP cube: log1p of pixels, FRP sum and max, day, night and high-confidence pixels, overpasses, and the mean scan size. Then day of year and cell position. LightGBM's lags also reach day t−3. The difference is space: the U-Net learns its own neighbourhood instead of the 3×3 and 5×5 summaries. No MODIS input.
+- **Rows:** the loss counts only the candidate cell-days of Brazil cells. These are exactly the rows of the training table: the scoring script checks it every test year (0 rows of difference out of 26 million). The rest of the image is context only.
+- **Training:** small U-Net (1.9 M parameters), positive class weighted (24.7), train 2012–2016. 2017 is held out to pick the epoch (best average precision: epoch 26 of 30) and to fit the isotonic calibration, as for LightGBM.
+
+Test 2018–2026, Brazil cells, the same rows and metrics as the national LightGBM above (bias / monthly WAPE / cell-month WAPE / ROC AUC / average precision):
+
+| Biome | LightGBM Brazil, calibrated | **U-Net, calibrated** |
+|---|---|---|
+| Brazil | −0.5% / 6.9% / 69.6% / 0.900 / 0.494 | **−1.7% / 6.5% / 69.2% / 0.909 / 0.496** |
+| Amazon | −0.6% / 7.3% / 61.9% / 0.896 / 0.503 | **−1.6% / 6.8% / 61.3% / 0.904 / 0.504** |
+| Cerrado | +2.0% / 7.0% / 67.4% / 0.909 / 0.529 | **−1.0% / 6.5% / 66.6% / 0.916 / 0.530** |
+| Atlantic Forest | +0.2% / 7.9% / 106.5% / 0.878 / 0.351 | **+0.9% / 7.5% / 107.0% / 0.891 / 0.350** |
+| Caatinga | −10.8% / 14.3% / 86.7% / 0.867 / 0.356 | **−7.8% / 12.5% / 86.8% / 0.878 / 0.362** |
+| Pampa | −13.2% / 19.5% / 116.6% / 0.892 / 0.360 | **−12.2% / 17.2% / 120.9% / 0.914 / 0.364** |
+| Pantanal | +6.3% / 9.3% / 43.0% / 0.953 / 0.765 | **+1.8% / 7.6% / 42.5% / 0.960 / 0.765** |
+
+What this shows:
+
+- **The U-Net is slightly better, not much better.** Monthly error is lower in every biome (Brazil 6.5% against 6.9%), and ROC AUC is higher everywhere. The national bias is a little worse (−1.7% against −0.5%). Average precision and cell-month error are about the same. The wider spatial context adds little on top of the 5×5 summaries: most of the signal is the fire's own strength (FRP) on the day.
+- **It helps most where LightGBM was weakest:** the Pantanal bias drops from +6.3% to +1.8%, Caatinga from −10.8% to −7.8%, and Pampa's monthly error from 19.5% to 17.2%.
+- **The yearly drift is the same in both models.** U-Net totals go from +3.8% (2018) to −8.6% (2024) and −9.5% (2025); LightGBM goes from +6.3% to −7.1% and −6.3%. The two models are built differently and drift together, so the drift is in the data, not in the model. A change in MODIS (orbit drift of Terra and Aqua) is the first suspect.
+- **Not used in the harmonized record yet.** The record (step 8) uses cross-fitted LightGBM with per-biome calibration (out-of-fold monthly error 6.9%). Replacing it would mean cross-fitting the U-Net too (five folds, about 5 GPU hours). The gain shown here, 0.4 points of monthly error, is small next to the drift.
 
 ### Harmonized record (step 8)
 

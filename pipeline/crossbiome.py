@@ -116,6 +116,33 @@ def coverage_by_biome(data_dir: Path, region: str, satellite: str, test_from: in
     return out
 
 
+def score_groups(cols: dict[str, np.ndarray], models: list[str]) -> dict:
+    """baselines.evaluate_arrays for Brazil and each biome, every model on the same rows.
+
+    cols holds y, cell_id, year, month, biome and one probability array per model;
+    by-year totals are kept for Brazil only."""
+    results = {}
+    for g in ["Brazil", *sorted(set(cols["biome"]))]:
+        mask = np.ones(len(cols["y"]), bool) if g == "Brazil" else cols["biome"] == g
+        if not cols["y"][mask].sum():
+            continue
+        results[g] = {
+            m: {
+                k: v
+                for k, v in baselines.evaluate_arrays(
+                    cols["y"][mask],
+                    cols[m][mask].astype(float),
+                    cols["cell_id"][mask],
+                    cols["year"][mask],
+                    cols["month"][mask],
+                ).items()
+                if k != "by_year" or g == "Brazil"
+            }
+            for m in models
+        }
+    return results
+
+
 def run(
     region: str = "brazil",
     data_dir: Path = DEFAULT_DATA_DIR,
@@ -171,27 +198,7 @@ def run(
         )
         del df
     cols = {k: np.concatenate(v) for k, v in parts.items()}
-
-    groups = ["Brazil", *sorted(set(cols["biome"]))]
-    results = {}
-    for g in groups:
-        mask = np.ones(len(cols["y"]), bool) if g == "Brazil" else cols["biome"] == g
-        if not cols["y"][mask].sum():
-            continue
-        results[g] = {
-            m: {
-                k: v
-                for k, v in baselines.evaluate_arrays(
-                    cols["y"][mask],
-                    cols[m][mask].astype(float),
-                    cols["cell_id"][mask],
-                    cols["year"][mask],
-                    cols["month"][mask],
-                ).items()
-                if k != "by_year" or g == "Brazil"
-            }
-            for m in models
-        }
+    results = score_groups(cols, models)
 
     out = data_dir / "processed" / region / "models" / satellite
     baselines.save_lightgbm(out, booster, info)
