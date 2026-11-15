@@ -66,7 +66,7 @@ Burning activity calendar (`app/api/history.py`, `app/history/`). Every route ta
 
 The API never runs a model: it sums the serving table with DuckDB (about 0.1 s for a season, about 1 s for 23 years of a biome). Today MODIS still delivers data, so the harmonized series equals MODIS (source `modis`, interval of zero width); the VIIRS estimate is served after MODIS ends or after `pipeline.serving --switch-date`. Its interval is the monthly per-biome 90% band weighted by the area's biome shares, an approximation that is too narrow for small areas.
 
-Real-time routes:
+Real-time and forecast routes:
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -74,7 +74,9 @@ Real-time routes:
 | GET | `/status` | Worker runs, per-source last success/error/count, live totals |
 | GET | `/fires/live?bbox=w,s,e,n&min_confidence=0.5` | Fused fire events (GeoJSON) |
 | GET | `/detections/recent?bbox=w,s,e,n&sensor=VIIRS` | Raw detections from every sensor (GeoJSON) |
-| GET | `/fires/stream` | SSE: one `snapshot` event on connect, then a `pulse` event after every poll |
+| GET | `/fires/stream` | SSE: one `snapshot` event on connect, then a `pulse` event after every poll and a `forecast` event when the forecast is re-anchored |
+| GET | `/forecast?min_p=0.05&bbox=w,s,e,n` | 7-day fire probability per 0.25° cell (lead 1 = today), with GOES anchoring |
+| GET | `/forecast/model` | Forecast model card: data, inputs, test scores, status |
 
 Fire event properties: `fire_id`, `uncertainty_km` (~95% radius), `confidence` (0–1), `sensors`, `n_detections`, `first_seen`, `last_seen`, `frp_max_mw`.
 
@@ -99,6 +101,39 @@ The gain in position comes mainly from VIIRS. The main gains from fusion are ear
 
 GOES pixel positions are computed from the GOES-R fixed-grid projection (PUG Vol. 5, section 4.2.8). The real ground size of each pixel is measured from its corners.
 
+## Fire forecast model
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ryangustav/Space-Monkeys/blob/main/notebooks/fire_forecast_base.ipynb)
+
+[`notebooks/fire_forecast_base.ipynb`](notebooks/fire_forecast_base.ipynb) trains the base fire forecast: for every 0.25° cell of Brazil, the probability of at least one fire detection on each of the next 7 days.
+
+- **Data:** NASA FIRMS VIIRS S-NPP yearly archive, 2012–2025 (presumed vegetation fires, nominal/high confidence), downloaded inside the notebook.
+- **Two training regions:** `REGION = "brazil"` learns from Brazil only; `REGION = "world"` learns from every country. Every run is scored on the same Brazil test (same cells, days and Brazil-only VIIRS truth), and the last section of the notebook compares all runs.
+- **Optional MODIS history (`USE_MODIS = True`):** adds MODIS C6.1 2000–2016. VIIRS sees about twice as many fire cell-days as MODIS, so the two are never mixed: each sensor has its own input channels and an "available" flag, and the network has one output head per sensor. The 2012–2016 overlap teaches how they relate, and MODIS inputs are randomly hidden there so the model runs on VIIRS alone from 2017 on and in production.
+- **Model:** small 2D U-Net (~1.9 M parameters). Inputs are image channels: the last 7 days of fire maps, the last 30 days, the climatology of each target day, seasonality and position.
+- **Evaluation:** time-based split (train 2012–2022, validation 2023, test 2024–2025), scored with average precision and Brier score against two references: climatology and persistence.
+- **Output:** `fire_forecast_<region>.onnx` + `fire_forecast_<region>.json`, run by the backend with ONNX Runtime.
+
+### Forecast in the API
+
+The backend serves the Brazil model from [`models/fire_forecast_brazil/`](models/fire_forecast_brazil/) (ONNX + climatology + mask + [`meta.json`](models/fire_forecast_brazil/meta.json), the model card). Test scores on Brazil 2024–2025, never seen in training:
+
+| Model | Average precision ↑ | Brier score ↓ |
+| --- | --- | --- |
+| Climatology | 0.303 | 0.0468 |
+| Persistence | 0.154 | 0.0497 |
+| **U-Net (Brazil, VIIRS)** | **0.396** | **0.0434** |
+| U-Net (world + MODIS) | 0.379 | 0.0438 |
+
+How a forecast is made:
+
+1. **Base forecast** (every `FORECAST_REFRESH_HOURS`): the last 30 days of VIIRS S-NPP NRT detections from FIRMS are gridded exactly like the training data and fed to the U-Net. It is issued for the last complete UTC day, so lead 1 is today.
+2. **GOES real-time anchor** (every pulse): a cell with a live fused fire seen today is raised to at least *confidence × P(fire persists j days)* for today and the following days. The persistence probabilities were measured on the training years ([`scripts/persistence_table.py`](scripts/persistence_table.py)). The anchor never lowers the model's forecast and is never fed into the network, which never saw GOES data. Anchored cells are flagged `anchored: true`.
+
+The NRT feed has no `type` column, so non-vegetation static heat sources cannot be removed at forecast time; the forecast mask limits the model to cells that burned during training.
+
+Run the training notebook in Colab with a T4 GPU (Runtime → Change runtime type). Edit `notebooks/fire_forecast_base.py`, the reviewable source, then rebuild the notebook with `python notebooks/build_notebooks.py`.
+
 ## Configuration
 
 All settings come from environment variables or `.env`; see [.env.example](.env.example).
@@ -117,6 +152,10 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `LIVE_RETENTION_HOURS` | `48` | How long live detections are kept |
 | `FUSION_RADIUS_KM` | `2` | Base linking distance |
 | `FUSION_WINDOW_HOURS` | `12` | Linking time window |
+| `ENABLE_FORECAST` | `true` | Load the forecast model and serve `/forecast` |
+| `FORECAST_MODEL_DIR` | `models/fire_forecast_brazil` | Folder with `model.onnx`, `climatology.npy`, `mask.npy`, `meta.json` |
+| `FORECAST_REFRESH_HOURS` | `6` | How often the base forecast is recomputed (needs `FIRMS_MAP_KEY`) |
+| `FORECAST_ANCHOR_HOURS` | `12` | How recent a live fire must be to anchor the forecast |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated frontend origins |
 | `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
 
@@ -126,7 +165,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 app/
   main.py            FastAPI app, CORS, worker lifecycle
   config.py          settings
-  api/               HTTP routes (system, live, history)
+  api/               HTTP routes (system, live, history, forecast)
   history/
     store.py         serving table access (DuckDB), areas (bbox, biome, drawn polygon)
     analytics.py     calendar buckets, normal year, anomaly, season, trend
@@ -138,6 +177,7 @@ app/
     pulse.py         publish/subscribe for SSE clients
     worker.py        polling loop
   fusion/fuse.py     multi-sensor fusion
+  forecast/          fire forecast: ONNX model, FIRMS history, GOES anchor
 pipeline/            historical batch pipeline (needs the [science] extra)
   ingest.py          FIRMS archive zips -> Parquet detections table
   cube.py            detections -> fire-day cube (0.1° cell x UTC day x satellite)
@@ -150,6 +190,9 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   figures.py         validation figures (docs/figures/)
   serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
 docs/api/openapi.yaml  API contract with the frontend
+models/             trained forecast model (ONNX, climatology, mask, model card)
+notebooks/          Colab notebooks (fire forecast model)
+scripts/            one-off data scripts (persistence table)
 tests/
 ```
 
@@ -312,6 +355,7 @@ Every dataset this project reads, with its citation.
 - **VIIRS NOAA-20 (JPSS-1) 375 m active fire, NRT** (`VJ114IMGTDL_NRT`, source `VIIRS_NOAA20_NRT`). NASA VIIRS Land Science Team, NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/FIRMS/VIIRS/VJ114IMGT_NRT.002
 - **VIIRS NOAA-21 (JPSS-2) 375 m active fire, NRT** (`VJ214IMGTDL_NRT`, source `VIIRS_NOAA21_NRT`). NASA VIIRS Land Science Team (2024), NASA LANCE MODIS at the MODAPS. https://doi.org/10.5067/VIIRS/VJ214IMG_NRT.002
 - **MODIS Collection 6.1 active fire, NRT** (`MCD14DL`, source `MODIS_NRT`), Terra and Aqua, 1 km. https://doi.org/10.5067/FIRMS/MODIS/MCD14DL.NRT.0061
+- **FIRMS yearly country archive**, used to train the forecast model: VIIRS S-NPP 2012–2025 and MODIS C6.1 2000–2016. Brazil `https://firms.modaps.eosdis.nasa.gov/data/country/{viirs-snpp|modis}/{year}/{sensor}_{year}_Brazil.csv` and all countries `https://firms.modaps.eosdis.nasa.gov/data/country/zips/{sensor}_{year}_all_countries.zip`
 - FIRMS FAQ (attribute meanings, e.g. `scan`/`track` pixel sizes): https://www.earthdata.nasa.gov/data/tools/firms/faq
 
 Historical record (pipeline), from the FIRMS archive download (https://firms.modaps.eosdis.nasa.gov/download/), CSV, one request per sensor:
@@ -358,20 +402,20 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 
 | Library | License |
 | --- | --- |
-| FastAPI, Pydantic, pydantic-settings, pytest, Ruff | MIT |
-| Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py | BSD-3-Clause |
-| xarray | Apache-2.0 |
-| DuckDB, LightGBM (pipeline, optional `[science]` extra) | MIT |
+| FastAPI, Pydantic, pydantic-settings, pytest, Ruff, ONNX Runtime | MIT |
+| Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py, PyTorch, scikit-learn | BSD-3-Clause |
+| xarray, ONNX, onnxscript, Requests | Apache-2.0 |
+| DuckDB (API and pipeline), LightGBM (pipeline) | MIT |
 | PyArrow (pipeline) | Apache-2.0 |
-| scikit-learn (pipeline metrics) | BSD-3-Clause |
 | Shapely (biome labels) | BSD-3-Clause |
 | pyshp (reads the IBGE shapefile) | MIT |
 | openapi-spec-validator (contract tests) | Apache-2.0 |
 | jsonschema (contract tests) | MIT |
-| PyTorch (pipeline) | BSD-3-Clause |
-| Matplotlib (validation figures) | Matplotlib License (PSF-based, BSD-compatible) |
+| Matplotlib | Matplotlib License (PSF-based) |
 | Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |
+
+The forecast notebook runs on Google Colab (hosted Jupyter runtime).
 
 ## NASA Space Apps Challenge 2026 compliance
 
@@ -389,6 +433,6 @@ The team designed the solution: a burning activity calendar from harmonized hots
 SI was used as a coding assistant:
 
 - **Tool:** Claude (Anthropic), a large language model, used through Claude Code.
-- **What it did:** wrote most of the backend code, tests and documentation in this repository from the team's design and instructions, looked up data access details (FIRMS API, GOES file layout, product DOIs), and checked the code against real GOES-19 data.
+- **What it did:** wrote most of the backend code, the forecast notebook, tests and documentation in this repository from the team's design and instructions, looked up data access details (FIRMS API, GOES file layout, product DOIs), and checked the code against real GOES-19 data.
 - **Review:** every SI-assisted file is reviewed and run by the team. Each one starts with the line `# SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team.`
 - **Not used for:** data values. All detections come straight from the public NASA and NOAA sources above; nothing is generated or simulated.

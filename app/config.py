@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # Burning activity calendar: folder written by `python -m pipeline.serving`
     history_data_dir: Path = Path("data/processed/brazil/serving")
 
+    # Fire forecast (U-Net, see notebooks/fire_forecast_base.py)
+    enable_forecast: bool = True
+    forecast_model_dir: str = "models/fire_forecast_brazil"
+    forecast_refresh_hours: float = Field(default=6.0, gt=0)
+    forecast_anchor_hours: float = Field(default=12.0, gt=0)
+
     # HTTP
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"]

@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: Space Monkeys API
-  version: 0.4.0
+  version: 0.5.0
   summary: Burning activity calendar from harmonized MODIS and VIIRS fire hotspots, plus a real-time fire pulse.
   description: |
     Contract between the Space Monkeys backend and frontend. It lists everything the
@@ -39,11 +39,16 @@ info:
           nearby (small, short fires). The 90% interval comes from the model's
           out-of-sample errors on monthly biome totals.
         - `mixed`: the bucket spans both sources.
-    - **What the API does not offer**: forecasts or fire risk (the product is
-      observational and historical, with no weather input), hotspot counts and FRP.
+    - **Two kinds of answers, never mixed**: `/history` is observational (what
+      happened, harmonized across sensors); `/forecast` is a model forecast for the
+      next 7 days (probability of at least one VIIRS fire detection per 0.25° cell,
+      a U-Net trained on the FIRMS VIIRS archive, no weather input). The API offers
+      no fire-risk index, hotspot counts or FRP.
     - **Sensors**: the historical record uses MODIS (Terra, Aqua) and VIIRS (S-NPP,
-      NOAA-20, NOAA-21) from NASA FIRMS. GOES ABI is used only by the real-time
-      routes (`live`). Landsat and Sentinel-3 SLSTR are not used.
+      NOAA-20, NOAA-21) from NASA FIRMS. The forecast model is trained on VIIRS
+      S-NPP and fed with VIIRS S-NPP NRT. GOES ABI is used only by the real-time
+      routes (`live`) and to anchor the forecast on fires burning now. Landsat and
+      Sentinel-3 SLSTR are not used.
     - **Dates** are ISO 8601 UTC days. Periods are inclusive of `start` and `end`.
     - **Weeks** are days 1–7, 8–14, ... of the year; the last week (index 51) runs
       to 31 December (8 or 9 days).
@@ -84,9 +89,11 @@ servers:
     description: Local development
 tags:
   - name: history
-    description: Burning activity calendar, climatology, anomalies, season and trend (planned).
+    description: Burning activity calendar, climatology, anomalies, season and trend.
   - name: live
     description: Real-time fused fires and detections (exists, frozen).
+  - name: forecast
+    description: 7-day fire forecast per 0.25° cell (U-Net), anchored on live fires.
   - name: system
     description: Health and worker status (exists).
 
@@ -502,6 +509,8 @@ paths:
         `text/event-stream`. Events:
         - `snapshot`: data is a `FireCollection` (with `updated_at`).
         - `pulse`: data is a `Pulse`.
+        - `forecast`: data is a `ForecastAnchored`, sent when the forecast is
+          re-anchored on the live fires (re-fetch `GET /forecast`).
         - comment lines `: ping` keep idle connections open.
       responses:
         "200":
@@ -509,6 +518,63 @@ paths:
           content:
             text/event-stream:
               schema: { type: string }
+
+  /forecast:
+    get:
+      tags: [forecast]
+      operationId: getForecast
+      summary: Probability of fire per 0.25° cell for the next 7 days (lead 1 = today)
+      description: |
+        Base forecast: a U-Net turns the last 30 days of VIIRS S-NPP NRT fire maps
+        into, for every 0.25° cell of Brazil, the probability of at least one VIIRS
+        fire detection on each of the next 7 days. It is issued for the last complete
+        UTC day (`issued_for`), so `valid_dates[0]` is today. Recomputed every
+        `FORECAST_REFRESH_HOURS`.
+        Real-time anchor: after every pulse, a cell with a live fused fire seen in the
+        last `FORECAST_ANCHOR_HOURS` is raised to at least
+        confidence × P(fire persists j days) from the day it was seen; such cells have
+        `anchored: true`. The anchor never lowers the model's forecast.
+        Only cells inside the forecast mask (or anchored) and reaching `min_p` on some
+        day are listed. Model card: `GET /forecast/model`.
+      parameters:
+        - name: min_p
+          in: query
+          description: Only cells reaching this probability on any day.
+          schema: { type: number, minimum: 0, maximum: 1, default: 0.05 }
+        - $ref: "#/components/parameters/bbox"
+      responses:
+        "200":
+          description: The current forecast.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Forecast" }
+        "422": { $ref: "#/components/responses/Invalid" }
+        "503":
+          description: The forecast is disabled, or none has been issued yet (needs `FIRMS_MAP_KEY`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /forecast/model:
+    get:
+      tags: [forecast]
+      operationId: getForecastModel
+      summary: Forecast model card
+      description: |
+        The model's `meta.json` (data, training/validation/test periods, inputs,
+        test average precision and Brier score against climatology and persistence,
+        persistence table) plus `status`.
+      responses:
+        "200":
+          description: Model card.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForecastModel" }
+        "503":
+          description: The forecast is disabled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /health:
     get:
@@ -1054,6 +1120,63 @@ components:
           type: array
           items: { type: string }
           description: fire_id values no longer live.
+
+    Forecast:
+      type: object
+      required: [model, issued_for, valid_dates, generated_at, anchored_at, resolution_deg, min_p, cells]
+      properties:
+        model: { type: string }
+        issued_for: { type: string, format: date, description: Last complete UTC day of input data. }
+        valid_dates:
+          type: array
+          description: The days the probabilities are for, one per lead (lead 1 = issued_for + 1).
+          items: { type: string, format: date }
+        generated_at: { type: string, format: date-time }
+        anchored_at: { type: [string, "null"], format: date-time }
+        resolution_deg: { type: number }
+        min_p: { type: number }
+        cells:
+          type: array
+          items:
+            type: object
+            required: [lat, lon, p, anchored]
+            properties:
+              lat: { type: number, description: Cell centre. }
+              lon: { type: number, description: Cell centre. }
+              p:
+                type: array
+                description: Probability of at least one VIIRS fire detection, one per valid date.
+                items: { type: number, minimum: 0, maximum: 1 }
+              anchored: { type: boolean, description: Raised by a live fire seen recently. }
+
+    ForecastModel:
+      type: object
+      description: The model card (models/fire_forecast_brazil/meta.json) plus status.
+      required: [model, status]
+      properties:
+        model: { type: string }
+        description: { type: string }
+        train_period: { type: array, items: { type: string, format: date } }
+        validation_period: { type: array, items: { type: string, format: date } }
+        test_period: { type: array, items: { type: string, format: date } }
+        resolution_deg: { type: number }
+        leads: { type: integer }
+        test_avg_precision: { type: object, additionalProperties: { type: number } }
+        test_brier: { type: object, additionalProperties: { type: number } }
+        status:
+          type: object
+          properties:
+            issued_for: { type: [string, "null"], format: date }
+            last_error: { type: [string, "null"] }
+      additionalProperties: true
+
+    ForecastAnchored:
+      type: object
+      required: [issued_for, anchored_at, anchored_cells]
+      properties:
+        issued_for: { type: string, format: date }
+        anchored_at: { type: string, format: date-time }
+        anchored_cells: { type: integer }
 
     Status:
       type: object
