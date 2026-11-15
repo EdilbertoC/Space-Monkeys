@@ -47,6 +47,25 @@ docker run -p 8000:8000 --env-file .env space-monkeys-back
 
 The `/history` routes read a folder built by the pipeline (`python -m pipeline.serving brazil`, see "Historical pipeline"); it is not in the image. Mount it and point `HISTORY_DATA_DIR` at it, for example `-v $PWD/data/processed/brazil/serving:/srv/history -e HISTORY_DATA_DIR=/srv/history`. Without it, `/history` answers 503 and the real-time routes work as before.
 
+## Deploy on Discloud
+
+The API runs on CPU only: a 7-day forecast for Brazil takes about 0.1 s and the server peaks around 400–600 MB, so no GPU is needed. Files: [`discloud.config`](discloud.config) (site `orbitburn.discloud.app`, port 8080, 1 GB RAM), [`requirements.txt`](requirements.txt) and [`.discloudignore`](.discloudignore), which leaves out the pipeline, notebooks, tests and `data/`. These three files are SI-assisted (see below); `discloud.config` and `.discloudignore` carry no header line because their comment syntax is not documented.
+
+Before zipping the project for upload:
+
+1. Copy the calendar data built by the pipeline into the project root: `data/processed/brazil/serving` → `history_data/` (only `meta.json`, `cell_day/` and `cell_biome.parquet` are read).
+2. Create `.env` in the project root (it is uploaded to Discloud, never committed):
+
+   ```
+   FIRMS_MAP_KEY=<your key>
+   HISTORY_DATA_DIR=history_data
+   CORS_ORIGINS=https://<frontend address>
+   ```
+
+3. Upload the zip on Discloud (a site needs the Platinum plan or higher). Check `https://orbitburn.discloud.app/health` and `/docs`.
+
+Run a single uvicorn process (the `START` line does): the live pulse and the forecast live in that process's memory.
+
 ## API
 
 **Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
