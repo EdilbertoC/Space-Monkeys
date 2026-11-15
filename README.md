@@ -196,6 +196,7 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
   unet.py            U-Net calibration (step 7), scored against LightGBM on the same rows
   harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
+  bridge.py          a new satellite onto the record through the one before it (NOAA-21 via NOAA-20)
   figures.py         validation figures (docs/figures/)
   serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
 docs/methodology.md    the harmonization method, its validation and its limits
@@ -367,7 +368,7 @@ From 2022 MODIS looks at the fires at other hours than before, so it is no longe
 
 **How the VIIRS estimate is built** (`pipeline/harmonize.py`):
 
-1. **Cross-fitting by year blocks over the reference years** (S-NPP: 2012–14, 2015–17, 2018–19, 2020–21; NOAA-20: 2018–19, 2020–21). Each block is predicted by a LightGBM trained on the other blocks only. The years after 2021 are predicted by one final model trained on every reference year: a forward prediction, as it will be after MODIS ends. NOAA-21 (2023) never overlapped the reference MODIS and is not calibrated.
+1. **Cross-fitting by year blocks over the reference years** (S-NPP: 2012–14, 2015–17, 2018–19, 2020–21; NOAA-20: 2018–19, 2020–21). Each block is predicted by a LightGBM trained on the other blocks only. The years after 2021 are predicted by one final model trained on every reference year: a forward prediction, as it will be after MODIS ends. NOAA-21 (2023) never overlapped the reference MODIS; it is bridged through NOAA-20 (see "Bridging the next satellite" below).
 2. **Calibration per biome** (isotonic, on the reference out-of-fold probabilities).
 3. **Coverage gap**: per biome and calendar month, g = all MODIS fire-days / MODIS fire-days inside the rows (reference years); each probability is multiplied by g. An area's estimate is Σ p × g, an expected count of MODIS fire cell-days (not an integer). In the wet season g is large (up to 5 in the Cerrado in March): there most of the estimate is the gap, not what VIIRS saw.
 4. **90% interval** per biome from the 5th/95th percentiles of the relative error of reference monthly totals. It is calibrated at the biome-month scale: it is not valid for yearly totals (errors partly cancel across months) nor for small areas (larger). Scale-aware intervals are left for the analytics step.
@@ -407,6 +408,43 @@ What this shows and what is still open:
 - **The switch date is an open decision.** `python -m pipeline.serving brazil --switch-date 2022-01-01` serves the VIIRS estimate from 2022, which removes the drift from recent trends. The estimate now runs to the last VIIRS day without MODIS, so a switch leaves no empty months; what remains is the decision itself.
 - **Areas that cross the border.** The estimate exists only in cells of a Brazilian biome. A box over Bolivia or Paraguay would lose that part after a switch.
 - Per-cell values remain much less certain than area totals; the gap of small fires is spread over cells where VIIRS saw activity.
+
+### Bridging the next satellite (NOAA-21)
+
+```bash
+python -m pipeline.bridge brazil --new N21 --reference N20   # needs NOAA-20's harmonized record
+python -m pipeline.serving brazil
+```
+
+NOAA-21 (2023) never flew with stable-orbit MODIS, so it cannot be calibrated the way S-NPP and NOAA-20 were. It flew with NOAA-20, so it is bridged through it (`pipeline/bridge.py`): for each cell-day NOAA-21 can see, the model learns the value NOAA-20's harmonized record gives that cell-day, already in MODIS-equivalent fire cell-days. Same recipe as the direct harmonization: the same rows and features, from NOAA-21 alone; LightGBM regression cross-fitted by single overlap years (2023–2026); isotonic calibration per biome; a coverage gap per biome and month for the NOAA-20 record mass outside NOAA-21's rows. Days either satellite was not observing are left out.
+
+Nothing in it is specific to these two satellites: `--new` and `--reference` take any pair, and a bridged satellite can be the reference of the next one. This is how the record can continue from 2000 through any number of satellite changes, one link at a time. The assumption is that the new satellite says nothing about MODIS that the reference does not, and every link adds its own error, so each link is scored.
+
+Out-of-fold scores against the NOAA-20 record, overlap 2023-03 to 2026-07 (each year predicted by a model that never saw it):
+
+| Area | Monthly WAPE | Bias |
+|---|---|---|
+| Brazil | 2.6% | −0.1% |
+| Amazon | 2.8% | +0.0% |
+| Cerrado | 4.8% | −0.6% |
+| Caatinga | 6.7% | +0.8% |
+| Atlantic Forest | 7.1% | +0.6% |
+| Pantanal | 9.2% | +0.2% |
+| Pampa | 16.1% | −0.3% |
+
+Brazil, NOAA-20 record / NOAA-21 through the bridge / observed MODIS: 152,185 / 149,489 / 158,939 (2023, from March), 187,918 / 190,981 / 195,038 (2024), 106,304 / 105,879 / 116,740 (2025). NOAA-21 lands where NOAA-20 does, so it inherits NOAA-20's distance to drifting MODIS and adds little of its own.
+
+**Does a chain lose accuracy? A control on a known link.** NOAA-20 has a direct harmonization against MODIS, so it can also be bridged through S-NPP and the two compared (`python -m pipeline.bridge brazil --new N20 --reference SNPP`). Monthly WAPE against observed MODIS, Brazil, the 45 months of 2018-04 to 2021 (stable MODIS orbits, every value out of fold):
+
+| Route to MODIS-equivalent | Monthly WAPE | Bias |
+|---|---|---|
+| NOAA-20 → S-NPP record (the chain) | 4.1% | −0.0% |
+| NOAA-20 → MODIS (direct) | 6.3% | +0.1% |
+| S-NPP record itself, same months | 4.3% | — |
+
+The extra link adds almost no error: the chain is as good as its first link, and better than the direct model, because S-NPP has ten reference years against NOAA-20's four. The link itself scores 2.8% against the S-NPP record (NOAA-21 → NOAA-20: 2.6%).
+
+In serving, NOAA-21 covers the days neither S-NPP nor NOAA-20 was observing. There is no such day yet (no NOAA-20 outage overlaps an S-NPP outage after March 2023), so the served values do not change today; NOAA-21 takes over when NOAA-20 fails or ends.
 
 `data/` is not committed.
 

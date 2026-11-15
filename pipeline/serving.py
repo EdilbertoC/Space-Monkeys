@@ -7,7 +7,8 @@ One row per 0.1° cell and UTC day with any fire signal:
 - viirs: 1 if any VIIRS satellite did (observed)
 - est:   MODIS-equivalent expected fire-days from the VIIRS model (pipeline.harmonize):
          S-NPP where it has an estimate, NOAA-20 after the last S-NPP estimate and
-         on the days S-NPP was not observing (pipeline.cube.observation_gaps);
+         on the days S-NPP was not observing (pipeline.cube.observation_gaps), and
+         NOAA-21 (bridged through NOAA-20, pipeline.bridge) on days neither covers;
          NULL where there is none. It runs to the last VIIRS day: the days after the
          training table come from the VIIRS-only application table, and those after
          VIIRS standard processing are provisional (meta coverage standard_until)
@@ -35,6 +36,7 @@ from pathlib import Path
 
 import duckdb
 
+from pipeline.bridge import record_dir
 from pipeline.cube import date_runs, observation_gaps, sql_dates
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -94,6 +96,12 @@ def detected_gaps(gaps: dict[str, list[date]], estimate_from: set[str]) -> list[
             effect = "MODIS counts are low on these days; they are left out of the model."
         elif sat == "SNPP" and "N20" in estimate_from:
             effect = "the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+        elif sat == "N20" and "N21" in estimate_from:
+            effect = (
+                "S-NPP covers these days; where it was not observing either or had ended, "
+                "the VIIRS estimate uses NOAA-21, bridged through NOAA-20 (none before "
+                "March 2023)."
+            )
         else:
             effect = "VIIRS counts are low on these days."
         for a, b in date_runs(gaps[sat]):
@@ -132,13 +140,15 @@ def build_serving(
     """)
 
     # VIIRS estimate: S-NPP first; NOAA-20 after the last S-NPP estimate and on the
-    # days S-NPP was not observing (an outage would read as "no fire").
+    # days S-NPP was not observing (an outage would read as "no fire"); NOAA-21 on the
+    # days neither covers.
     gaps = observation_gaps(region, data_dir)
     est_parts, est_sats, viirs_sources, est_last = [], [], [], None
     covered: list[str] = []  # SQL: the day already has an estimate from an earlier satellite
-    for sat in ("SNPP", "N20"):
-        d = harmonized / sat
-        if not d.exists():
+    for sat in ("SNPP", "N20", "N21"):
+        try:
+            d = record_dir(data_dir, region, sat)  # N21: bridged through NOAA-20
+        except FileNotFoundError:
             continue
         src = f"read_parquet('{d.as_posix()}/**/*.parquet', hive_partitioning = true)"
         first, last = con.execute(
