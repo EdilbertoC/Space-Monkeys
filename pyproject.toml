@@ -23,6 +23,7 @@ dependencies = [
     "h5py>=3.11",
     "duckdb>=1.1",
     "onnxruntime>=1.18",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import forecast, history, live, system
+from app.api import docs, forecast, history, live, system
 from app.config import get_settings
 from app.forecast.model import ForecastModel
 from app.forecast.service import ForecastService
@@ -60,6 +60,8 @@ def create_app() -> FastAPI:
             "7-day fire forecast from a U-Net trained on the NASA FIRMS archive."
         ),
         lifespan=lifespan,
+        docs_url=None,  # /docs and /redoc show the hand-written contract (app/api/docs.py)
+        redoc_url=None,
     )
     app.add_middleware(
         CORSMiddleware,
@@ -71,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(live.router)
     app.include_router(history.router)
     app.include_router(forecast.router)
+    app.include_router(docs.router)
     return app
 
 

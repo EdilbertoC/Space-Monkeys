@@ -93,3 +93,15 @@ def test_llms_txt_is_served(monkeypatch):
         assert "/history/calendar" in r.text and "/forecast" in r.text
         assert "/llms.txt" not in client.get("/openapi.json").json()["paths"]
     get_settings.cache_clear()
+
+
+def test_human_docs_use_the_contract(monkeypatch):
+    with _client(monkeypatch) as client:
+        page = client.get("/docs")
+        assert page.status_code == 200 and "/contract.json" in page.text
+        assert client.get("/redoc").status_code == 200
+        spec = client.get("/contract.json").json()
+        assert spec["servers"][0]["url"] == "http://testserver"
+        assert "/history/calendar" in spec["paths"] and "/forecast" in spec["paths"]
+        assert "fire cell-day" in spec["info"]["description"].lower()
+    get_settings.cache_clear()

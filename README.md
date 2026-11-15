@@ -49,7 +49,7 @@ The `/history` routes read a folder built by the pipeline (`python -m pipeline.s
 
 ## Deploy on Discloud
 
-The API runs on CPU only: a 7-day forecast for Brazil takes about 0.1 s and the server peaks around 400–600 MB, so no GPU is needed. Files: [`discloud.config`](discloud.config) (site `orbitburn.discloud.app`, port 8080, 1 GB RAM), [`requirements.txt`](requirements.txt) and [`.discloudignore`](.discloudignore), which leaves out the pipeline, notebooks, tests and `data/`. These three files are SI-assisted (see below); `discloud.config` and `.discloudignore` carry no header line because their comment syntax is not documented.
+The API runs on CPU only: a 7-day forecast for Brazil takes about 0.1 s and the server peaks around 400–600 MB, so no GPU is needed. Files: [`discloud.config`](discloud.config) (site `orbitburn.discloud.app`, port 8080, 1 GB RAM, Python 3.11: Discloud's `latest` is Python 3.15, for which onnxruntime has no wheels yet), [`requirements.txt`](requirements.txt) and [`.discloudignore`](.discloudignore), which leaves out the pipeline, notebooks, tests and `data/`. These three files are SI-assisted (see below); `discloud.config` and `.discloudignore` carry no header line because their comment syntax is not documented.
 
 Before zipping the project for upload:
 
@@ -67,6 +67,8 @@ Before zipping the project for upload:
 Run a single uvicorn process (the `START` line does): the live pulse and the forecast live in that process's memory.
 
 ## API
+
+For people, `/docs` shows the hand-written contract ([`docs/api/openapi.yaml`](docs/api/openapi.yaml)) with units, conventions, real examples and "Try it out" against the server; `/redoc` shows the same as a reading page. FastAPI's generated schema stays at `/openapi.json`.
 
 For language models and AI agents, [`llms.txt`](llms.txt) explains every route, unit and rule in plain language ([llmstxt.org](https://llmstxt.org/) format). The server also serves it at `/llms.txt`. The full contract is [`docs/api/openapi.yaml`](docs/api/openapi.yaml).
 

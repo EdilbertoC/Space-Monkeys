@@ -11,7 +11,7 @@ notebooks
 pipeline
 scripts
 tests
-docs
+docs/figures
 Dockerfile
 CLAUDE.md
 .env.example
