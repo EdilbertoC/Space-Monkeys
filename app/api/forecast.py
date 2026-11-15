@@ -1,12 +1,14 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 """Fire forecast endpoints."""
 
+import threading
 from typing import Literal
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.deps import parse_bbox
+from app.forecast.regions import grid_labels
 from app.forecast.service import ForecastService
 
 router = APIRouter(tags=["forecast"])
@@ -42,6 +44,28 @@ def forecast_model(service: ForecastService = Depends(get_forecast)) -> dict:
         "last_error": service.last_error,
     }
     return meta
+
+
+_labels_lock = threading.Lock()
+
+
+@router.get(
+    "/forecast/summary",
+    summary="Expected fire cells per biome (and Brazil) for each of the next 7 days",
+)
+def forecast_summary(request: Request, service: ForecastService = Depends(get_forecast)) -> dict:
+    store = getattr(request.app.state, "history", None)
+    if store is None:
+        raise HTTPException(503, "Biome labels need the historical data (HISTORY_DATA_DIR)")
+    with _labels_lock:
+        labels = getattr(request.app.state, "forecast_labels", None)
+        if labels is None:
+            labels = grid_labels(store.cell_biome_frame(), service.model.grid)
+            request.app.state.forecast_labels = labels
+    try:
+        return service.region_summary(*labels)
+    except LookupError as exc:
+        raise HTTPException(503, f"Forecast not available yet: {exc}") from exc
 
 
 Biome = Literal["Amazon", "Caatinga", "Cerrado", "Atlantic Forest", "Pampa", "Pantanal"]

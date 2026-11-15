@@ -75,7 +75,7 @@ For language models and AI agents, [`llms.txt`](llms.txt) explains every route, 
 
 **Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
 
-Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`, and the VIIRS layers `viirs_only` and `detected` (see [The VIIRS-only layer](#the-viirs-only-layer-harmonizing-without-losing-what-viirs-sees)). The routes that compare years (climatology, anomaly, season, trend) answer `series=viirs` with 422: it counts fire seen by any VIIRS satellite, so it steps up when NOAA-20 (2018, about +50% fire cell-days over S-NPP alone) and NOAA-21 (2023, about +80%) join.
+Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019), `country=BR` (every biome-labelled cell) or `area_id=` from `POST /history/areas`. Biomes and Brazil keep their whole daily series in memory after the first request (warmed in the background at start-up), so the analytics answer in tens of milliseconds. Series: `harmonized` (default), `modis`, `viirs`, and the VIIRS layers `viirs_only` and `detected` (see [The VIIRS-only layer](#the-viirs-only-layer-harmonizing-without-losing-what-viirs-sees)). The routes that compare years (climatology, anomaly, season, trend) answer `series=viirs` with 422: it counts fire seen by any VIIRS satellite, so it steps up when NOAA-20 (2018, about +50% fire cell-days over S-NPP alone) and NOAA-21 (2023, about +80%) join.
 
 | Method | Path | Returns |
 | --- | --- | --- |
@@ -83,10 +83,11 @@ Burning activity calendar (`app/api/history.py`, `app/history/`). Every route ta
 | POST | `/history/areas` | `{"geometry": <GeoJSON Polygon/MultiPolygon>}` → `area_id`, cells, bbox, biome shares |
 | GET | `/history/calendar?start&end&granularity=day\|week\|month` | Fire cell-days per bucket: harmonized (with interval and source), MODIS, VIIRS, the VIIRS-only layer and detected, provisional flag |
 | GET | `/history/climatology?series&granularity=week\|month` | Normal year over complete base years (default 2003 to last complete year): median, 10th/90th percentiles, mean |
-| GET | `/history/anomaly?start&end&series` | The period against the same calendar dates in every other base year: percentile, class below/normal/above/record |
+| GET | `/history/anomaly?start&end&series` | The period against the same calendar dates in every other base year: percentile, class below/normal/above/record, and the 90% interval of the harmonized total |
+| GET | `/history/anomalies?year&areas=biomes\|biomes+country&series` | Every month of a year against normal, in every biome (and Brazil), in one call; the month in progress is compared up to the last day of data |
 | GET | `/history/season?year&series` | Season start (10%), peak and end (90%) weeks, against the normal season |
 | GET | `/history/trend?series&start_year&end_year` | Yearly totals and Theil–Sen slope with 95% CI |
-| GET | `/history/map?start&end` | Fire cell-days per 0.1° cell with fire, including the VIIRS-only layer (where the small fires are) |
+| GET | `/history/map?start&end&cell_degrees=0.1\|0.25\|0.5\|1\|auto` | Fire cell-days per cell with fire, including the VIIRS-only layer (where the small fires are); coarser grids sum the 0.1° cells, `auto` picks the finest grid within `max_map_cells` |
 
 The API never runs a model: it sums the serving table with DuckDB (about 0.1 s for a season, about 1 s for 23 years of a biome). Today MODIS still delivers data, so the harmonized series equals MODIS (source `modis`, interval of zero width); the VIIRS estimate is served after MODIS ends or after `pipeline.serving --switch-date`. Its interval is the monthly per-biome 90% band weighted by the area's biome shares, an approximation that is too narrow for small areas.
 
@@ -102,6 +103,7 @@ Real-time and forecast routes:
 | GET | `/forecast?min_p=0.05&bbox=w,s,e,n` | 7-day fire probability per 0.25° cell (lead 1 = today), with GOES anchoring |
 | GET | `/forecast/outlook?bbox=w,s,e,n` or `?biome=` | The forecast summed over an area next to the normal for those dates (`ratio_to_normal`); biome areas come from the historical data |
 | GET | `/forecast/model` | Forecast model card: data, inputs, test scores, status |
+| GET | `/forecast/summary` | Per biome and Brazil, for each of the 7 days: expected number of 0.25° cells with fire (sum of probabilities) and cells at 50% or more |
 
 Fire event properties: `fire_id`, `uncertainty_km` (~95% radius), `confidence` (0–1), `sensors`, `n_detections`, `first_seen`, `last_seen`, `frp_max_mw`.
 
@@ -193,6 +195,7 @@ All settings come from environment variables or `.env`; see [.env.example](.env.
 | `FORECAST_SOURCE` | `VIIRS_NOAA20_NRT` | FIRMS NRT source fed to the forecast model (S-NPP ended 2026-11-02) |
 | `CORS_ORIGINS` | `*` | Origins allowed to call the API from a browser; `*` = any (the API is public, read-only and uses no cookies). Comma-separated list to restrict |
 | `HISTORY_DATA_DIR` | `data/processed/brazil/serving` | Folder written by `python -m pipeline.serving`, read by `/history` |
+| `HISTORY_WARM_UP` | `true` | Load the daily series of every biome and of Brazil in the background at start-up, so the first analytics requests are fast |
 
 ## Project layout
 

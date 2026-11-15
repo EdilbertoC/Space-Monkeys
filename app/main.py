@@ -1,5 +1,7 @@
 # SI-assisted: written with Claude (Anthropic), reviewed by the Space Monkeys team. See README.
 import logging
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -35,6 +37,16 @@ for _handler in logging.getLogger().handlers:
     _handler.addFilter(_RedactSecrets())
 
 
+def _warm(store: HistoryStore) -> None:
+    log = logging.getLogger(__name__)
+    try:
+        start = time.perf_counter()
+        store.warm()
+        log.info("History series cached in %.1f s", time.perf_counter() - start)
+    except Exception:  # a failed warm-up only means slower first requests
+        log.exception("History warm-up failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -47,6 +59,9 @@ async def lifespan(app: FastAPI):
     app.state.history = None
     if (settings.history_data_dir / "meta.json").exists():
         app.state.history = HistoryStore(settings.history_data_dir)
+        if settings.history_warm_up:
+            # Load biome and country series in the background so first requests are fast.
+            threading.Thread(target=_warm, args=(app.state.history,), daemon=True).start()
     else:
         logging.getLogger(__name__).warning(
             "No historical data in %s: /history answers 503", settings.history_data_dir

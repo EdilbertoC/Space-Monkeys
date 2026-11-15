@@ -145,6 +145,36 @@ def test_forecast_endpoint(monkeypatch, model):
     get_settings.cache_clear()
 
 
+def test_region_summary_counts_expected_fire_cells(model):
+    from app.forecast.regions import grid_labels
+
+    service = _service_with_flat_forecast(model, p=0.6)
+    grid = model.grid
+    # Label one forecast cell inside the mask with a biome, through two 0.1° cells.
+    rows, cols = np.nonzero(model.mask)
+    lat_c = grid.north - grid.res * (rows[0] + 0.5)
+    lon_c = grid.west + grid.res * (cols[0] + 0.5)
+
+    def cid(lat, lon):
+        return int(np.floor((lat + 90) * 10)) * 3600 + int(np.floor((lon + 180) * 10))
+
+    cells = pd.DataFrame(
+        {
+            "cell_id": [cid(lat_c, lon_c), cid(lat_c, lon_c - 0.1), cid(0.0, 0.0)],
+            "biome": ["Pantanal", "Pantanal", None],
+        }
+    )
+    labels, names = grid_labels(cells, grid)
+    assert names == ["Pantanal"] and int((labels == 0).sum()) == 1
+    summary = service.region_summary(labels, names)
+    pantanal, brazil = summary["regions"]
+    assert (pantanal["kind"], pantanal["name"], pantanal["cells"]) == ("biome", "Pantanal", 1)
+    assert pantanal["expected_fire_cells"] == [0.6] * 7
+    assert pantanal["cells_at_least_50"] == [1] * 7
+    assert brazil == {**pantanal, "kind": "country", "name": "Brazil"}
+    assert summary["valid_dates"][0] == "2024-08-21"
+
+
 def test_anchor_never_claims_certainty(model):
     service = _service_with_flat_forecast(model)
     fires = pd.DataFrame(

@@ -26,6 +26,9 @@ from app.history.analytics import Coverage
 N_COLS = 3600  # 0.1° columns around the globe
 CELLS_PER_DEGREE = 10
 MAX_STORED_AREAS = 256
+MAX_CACHED_SERIES = 32  # full-record daily series kept in memory, per area
+LONG_REQUEST_DAYS = 730  # longer requests load (and cache) the area's whole record
+COUNTRIES = {"BR": "Brazil"}  # cells labelled with any IBGE biome are Brazil
 
 
 class AreaError(ValueError):
@@ -150,6 +153,11 @@ class HistoryStore:
         self._areas: OrderedDict[str, Area] = OrderedDict()
         self._lock = threading.Lock()
         self.coverage = self._coverage()
+        self._series: OrderedDict[str, pd.DataFrame] = OrderedDict()
+        self._series_lock = threading.Lock()
+        cov = self.coverage
+        ends = [cov.modis[1], cov.viirs[1]] + ([cov.estimate[1]] if cov.estimate else [])
+        self.record = (min(cov.modis[0], cov.viirs[0]), max(ends))
 
     def _coverage(self) -> Coverage:
         c, h = self.meta["coverage"], self.meta["harmonization"]
@@ -191,6 +199,15 @@ class HistoryStore:
         name = biome.replace("'", "")
         pred = f"cell_id IN (SELECT cell_id FROM cell_biome WHERE biome = '{name}')"
         return Area("biome", cells, pred, {"biome": biome})
+
+    def area_from_country(self, code: str) -> Area:
+        """A whole country. Predefined, so it is not held to `max_area_cells` (which
+        bounds arbitrary boxes and polygons); its series is cached like a biome's."""
+        if code not in COUNTRIES:
+            raise AreaError(f"unknown country {code}")
+        cells = sum(self.biome_cells.values())
+        pred = "cell_id IN (SELECT cell_id FROM cell_biome WHERE biome IS NOT NULL)"
+        return Area("country", cells, pred, {"country": code})
 
     def biome_cell_ids(self, biome: str) -> np.ndarray:
         """Ids of the 0.1° cells of a biome (used by the forecast outlook)."""
@@ -284,11 +301,46 @@ class HistoryStore:
         hi = sum(bands[b][1] * s for b, s in shares.items()) / total
         return (lo, hi)
 
+    def cell_biome_frame(self) -> pd.DataFrame:
+        """Every labelled 0.1° cell: `cell_id` and `biome` (None outside Brazil)."""
+        return self.con.cursor().execute("SELECT cell_id, biome FROM cell_biome").fetchdf()
+
     # ---- data --------------------------------------------------------------------
     def daily(self, area: Area, start: date, end: date) -> pd.DataFrame:
         """Area sums per day: modis, viirs (observed), est (VIIRS estimate), fine
-        (VIIRS-only layer); every day of [start, end] is present (0 when nothing
-        happened)."""
+        (VIIRS-only layer); every day of [start, end] is present (0 when nothing happened).
+
+        Biomes, countries and long requests read the area's whole record once and keep
+        it in memory (LRU of MAX_CACHED_SERIES areas); later requests slice it. The data
+        is read-only for the life of the process, so the cache never goes stale."""
+        key = area.predicate
+        with self._series_lock:
+            full = self._series.get(key)
+            if full is not None:
+                self._series.move_to_end(key)
+        if full is None and (
+            area.kind in ("biome", "country") or (end - start).days > LONG_REQUEST_DAYS
+        ):
+            full = self._query_daily(area, *self.record)
+            with self._series_lock:
+                self._series[key] = full
+                while len(self._series) > MAX_CACHED_SERIES:
+                    self._series.popitem(last=False)
+        if full is None:
+            return self._query_daily(area, start, end)
+        idx = pd.date_range(start, end, freq="D")
+        return full.reindex(idx, fill_value=0.0)
+
+    def warm(self) -> None:
+        """Load the series of every biome and country (called in the background at start)."""
+        areas = [self.area_from_biome(b) for b in self.biome_cells] + [
+            self.area_from_country(c) for c in COUNTRIES
+        ]
+        for area in areas:
+            self.daily(area, *self.record)
+
+    def _query_daily(self, area: Area, start: date, end: date) -> pd.DataFrame:
+        """Area sums per day, straight from the serving table (see `daily`)."""
         rows = (
             self.con.cursor()
             .execute(f"""
