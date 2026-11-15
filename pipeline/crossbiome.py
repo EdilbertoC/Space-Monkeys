@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -38,6 +39,7 @@ import numpy as np
 import pandas as pd
 
 from pipeline import baselines
+from pipeline.cube import sql_dates
 from pipeline.training import FEATURES, SATELLITES, TARGET
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,12 +62,17 @@ def load_training_sample(
     satellite: str,
     rate: float = SAMPLE_RATE,
     splits: tuple[str, ...] = ("train",),
+    last_year: int | None = None,
+    exclude_dates: list[date] | None = None,
 ) -> pd.DataFrame:
     """Every own-detection row plus a hash-chosen `rate` of the neighbour/lag-only
-    rows (weight 1/rate), Brazil cells only. Features are read as 32-bit floats."""
+    rows (weight 1/rate), Brazil cells only. Features are read as 32-bit floats.
+    Optionally only years up to `last_year` and without the days in `exclude_dates`."""
     cols = ", ".join(f"CAST({f} AS FLOAT) AS {f}" for f in FEATURES)
     keep = int(rate * 1000)
     split_list = ", ".join(f"'{s}'" for s in splits)
+    extra = f"AND year <= {int(last_year)} " if last_year is not None else ""
+    extra += f"AND date NOT IN ({sql_dates(exclude_dates or [])})"
     return (
         duckdb.connect()
         .execute(f"""
@@ -74,6 +81,7 @@ def load_training_sample(
             FROM {_table(data_dir, region, satellite)}
             WHERE split IN ({split_list}) AND biome IS NOT NULL
               AND (v_pixels > 0 OR hash(cell_id, date) % 1000 < {keep})
+              {extra}
         """)
         .fetchdf()
     )

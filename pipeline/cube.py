@@ -28,6 +28,7 @@ import argparse
 import json
 import math
 import shutil
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -179,6 +180,64 @@ def build_cube(region: str, data_dir: Path = DEFAULT_DATA_DIR) -> dict:
         json.dumps(report, indent=2, default=str), encoding="utf-8"
     )
     return report
+
+
+MIN_OTHER_CELL_DAYS = 100  # fire cell-days the other satellites need to call a day a gap
+
+
+def observation_gaps(
+    region: str, data_dir: Path = DEFAULT_DATA_DIR, min_other: int = MIN_OTHER_CELL_DAYS
+) -> dict[str, list[date]]:
+    """Days a satellite most likely did not observe the region, per satellite.
+
+    FIRMS has no record of what a satellite looked at, so a day without detections
+    reads as "no fire". It is called a gap when the satellite has no detection in the
+    whole region while the other satellites together have at least `min_other` fire
+    cell-days, between the satellite's first and last day in the cube. In a small or
+    quiet region a short outage stays unseen (and matters little)."""
+    cube_dir = data_dir / "processed" / region / "cube"
+    rows = (
+        duckdb.connect()
+        .execute(
+            f"""
+            WITH per AS (
+                SELECT satellite, date, count(*) AS n
+                FROM read_parquet('{cube_dir.as_posix()}/**/*.parquet', hive_partitioning = true)
+                GROUP BY ALL
+            ),
+            life AS (SELECT satellite, min(date) AS a, max(date) AS b FROM per GROUP BY 1),
+            total AS (SELECT date, sum(n) AS n FROM per GROUP BY 1)
+            SELECT l.satellite, t.date
+            FROM life l
+            JOIN total t ON t.date BETWEEN l.a AND l.b
+            LEFT JOIN per p ON p.satellite = l.satellite AND p.date = t.date
+            WHERE p.n IS NULL AND t.n >= ?
+            ORDER BY 1, 2
+            """,
+            [min_other],
+        )
+        .fetchall()
+    )
+    gaps: dict[str, list[date]] = {}
+    for satellite, day in rows:
+        gaps.setdefault(satellite, []).append(day)
+    return gaps
+
+
+def date_runs(days: list[date]) -> list[tuple[date, date]]:
+    """Sorted days as (first, last) runs of consecutive days."""
+    runs: list[tuple[date, date]] = []
+    for d in sorted(days):
+        if runs and (d - runs[-1][1]).days == 1:
+            runs[-1] = (runs[-1][0], d)
+        else:
+            runs.append((d, d))
+    return runs
+
+
+def sql_dates(days: list[date]) -> str:
+    """A SQL list of dates for `date NOT IN (...)`; never empty."""
+    return ", ".join(f"DATE '{d}'" for d in days) or "DATE '0001-01-01'"
 
 
 def main(argv: list[str] | None = None) -> None:

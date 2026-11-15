@@ -17,13 +17,41 @@ from tests.test_cube import report_and_cube  # noqa: E402, F401  (fixture)
 FIRE = (-15.21718, -55.5285)  # 2020-09-18, seen by S-NPP, NOAA-20 and Aqua
 
 
-def test_every_overlap_year_has_exactly_one_fold():
+def test_reference_years_have_one_fold_and_later_years_the_final_model():
+    last = harmonize.REFERENCE_LAST_YEAR
     for sat, folds in harmonize.FOLDS.items():
         start = int(training.SATELLITES[sat]["start"][:4])
-        for year in range(start, 2027):
+        assert all(b <= last for _, b in folds)  # no fold uses MODIS of the drift years
+        for year in range(start, last + 1):
             assert sum(a <= year <= b for a, b in folds) == 1, (sat, year)
+            assert harmonize.fold_of(year, folds) != harmonize.FINAL
+        assert harmonize.fold_of(last + 1, folds) == harmonize.FINAL
     with pytest.raises(ValueError):
         harmonize.fold_of(2011, harmonize.FOLDS["SNPP"])
+
+
+def test_calibrators_use_only_reference_rows(tmp_path):
+    def part(year, day, raw, y):
+        d = tmp_path / f"year={year}"
+        d.mkdir(exist_ok=True)
+        pd.DataFrame(
+            {
+                "cell_id": np.arange(len(raw)),
+                "date": pd.Timestamp(day),
+                "biome": "A",
+                "y": np.array(y, dtype=np.int8),
+                "raw": np.array(raw, dtype=np.float32),
+            }
+        ).to_parquet(d / f"{day}.parquet", index=False)
+
+    part(2021, "2021-09-01", [0.2, 0.2, 0.8, 0.8], [0, 0, 1, 1])
+    part(2021, "2021-09-02", [0.2, 0.8], [1, 0])  # a day MODIS was not observing
+    part(2022, "2022-09-01", [0.2, 0.2, 0.8, 0.8], [1, 1, 0, 0])  # after the reference
+    gap = [pd.Timestamp("2021-09-02").date()]
+    cal = harmonize.fit_biome_calibrators(tmp_path, last_year=2021, exclude_dates=gap)["A"]
+    assert harmonize.baselines.apply_calibration(np.array([0.2, 0.8]), cal) == pytest.approx([0, 1])
+    everything = harmonize.fit_biome_calibrators(tmp_path)["A"]
+    assert harmonize.baselines.apply_calibration(np.array([0.2]), everything)[0] > 0.4
 
 
 def test_calibration_per_biome_keeps_each_biome_total():
@@ -62,3 +90,7 @@ def test_gap_factor_counts_modis_fire_days_outside_the_rows(report_and_cube, tmp
 
     gaps = harmonize.gap_factors(tmp_path, "test", "SNPP", "2012-01-20", "2020-09-18")
     assert gaps == {"Pantanal": {9: 1.0}}  # the one Aqua fire-day is inside the rows
+    left_out = [pd.Timestamp("2020-09-18").date()]
+    assert (
+        harmonize.gap_factors(tmp_path, "test", "SNPP", "2012-01-20", "2020-09-18", left_out) == {}
+    )

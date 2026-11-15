@@ -67,8 +67,10 @@ info:
     model that never saw it), to show there is no step where the source changes.
     The switch to the VIIRS estimate happens when MODIS ends, or earlier at
     `harmonization.switch_date` if the team decides MODIS orbital drift has made it
-    unreliable (an open decision). VIIRS satellite used: S-NPP until it ended
-    (2026-11-02), then NOAA-20. Every
+    unreliable (an open decision). The model learns only from MODIS up to 2021,
+    before the orbits of Terra and Aqua started to drift. VIIRS satellite used:
+    S-NPP until it ended (2026-11-02), then NOAA-20; NOAA-20 also on the days
+    S-NPP was not observing (listed in `known_gaps`). Every
     example in this file is a real value computed from the NASA FIRMS archive for
     the Pantanal biome (IBGE 2019), not invented data.
 
@@ -135,7 +137,7 @@ paths:
                       - { name: Pantanal, cells: 1301 }
                     harmonization:
                       status: available
-                      method: "MODIS observed while MODIS delivers data; afterwards MODIS-equivalent expected fire cell-days estimated from VIIRS (LightGBM cross-fitted by year blocks, calibrated per biome, coverage gap added back)."
+                      method: "MODIS observed while MODIS delivers data; afterwards MODIS-equivalent expected fire cell-days estimated from VIIRS (LightGBM cross-fitted by year blocks on the years of stable MODIS orbits, calibrated per biome, coverage gap added back)."
                       switch_date: null
                       viirs_satellites:
                         - { name: SNPP, start: "2012-01-20", end: "2026-07-31" }

@@ -3,7 +3,10 @@
 tests (one S-NPP detection on 2012-01-20; one fire on 2020-09-18 seen by S-NPP,
 NOAA-20 and Aqua). Every 200 response is checked against the contract schema."""
 
+from datetime import date
+
 import numpy as np
+import pandas as pd
 import pytest
 
 pytest.importorskip("duckdb")
@@ -204,3 +207,34 @@ def test_history_unavailable_without_data(tmp_path, monkeypatch):
     with TestClient(create_app()) as c:
         assert c.get("/history/meta").status_code == 503
     get_settings.cache_clear()
+
+
+def test_serving_uses_noaa20_when_snpp_was_not_observing(report_and_cube, tmp_path, monkeypatch):  # noqa: F811
+    """Which satellite's estimate is served, per day (plain numbers as estimates)."""
+    cell = cube.cell_id(*FIRE)
+    labels = biomes.label_cells(np.array([cell]), {"Pantanal": shapely.box(-61, -16, -54, -14)})
+    labels.to_parquet(tmp_path / "processed" / "test" / "cell_biome.parquet", index=False)
+    for sat, rows in (
+        ("SNPP", {"2020-09-18": 0.5, "2020-09-19": 0.1}),
+        ("N20", {"2020-09-18": 0.7, "2020-09-19": 0.6, "2020-09-20": 0.9}),
+    ):
+        d = tmp_path / "processed" / "test" / "harmonized" / sat / "year=2020"
+        d.mkdir(parents=True)
+        pd.DataFrame(
+            {"cell_id": cell, "date": pd.to_datetime(list(rows)), "equiv": list(rows.values())}
+        ).to_parquet(d / "harmonized.parquet", index=False)
+    outage = date(2020, 9, 19)  # S-NPP not observing: its 0.1 is only a lag row
+    monkeypatch.setattr(serving, "observation_gaps", lambda region, data_dir: {"SNPP": [outage]})
+
+    meta = serving.build_serving("test", tmp_path)
+    served = pd.read_parquet(tmp_path / "processed" / "test" / "serving" / "cell_day")
+    est = {str(pd.Timestamp(r.date).date()): r.est for r in served.itertuples() if r.est == r.est}
+    assert est == pytest.approx({"2020-09-18": 0.5, "2020-09-19": 0.6, "2020-09-20": 0.9})
+    assert meta["harmonization"]["viirs_satellites"] == [
+        {"name": "SNPP", "start": "2020-09-18", "end": "2020-09-19"},
+        {"name": "N20", "start": "2020-09-20", "end": "2020-09-20"},
+    ]
+    gap = meta["known_gaps"][-1]
+    assert (gap["sensor"], gap["period"]) == ("VIIRS", "2020-09-19")
+    assert "NOAA-20" in gap["note"]
+    conforms(meta, "Meta")

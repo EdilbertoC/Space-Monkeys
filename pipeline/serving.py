@@ -6,11 +6,13 @@ One row per 0.1° cell and UTC day with any fire signal:
 - modis: 1 if MODIS (Terra or Aqua) detected fire there that day (observed)
 - viirs: 1 if any VIIRS satellite did (observed)
 - est:   MODIS-equivalent expected fire-days from the VIIRS model (pipeline.harmonize):
-         S-NPP where it has an estimate, NOAA-20 after the last S-NPP estimate;
+         S-NPP where it has an estimate, NOAA-20 after the last S-NPP estimate and
+         on the days S-NPP was not observing (pipeline.cube.observation_gaps);
          NULL where there is none
 
 plus meta.json: coverage per sensor, biomes, harmonization method and switch date,
-model scores and monthly intervals per biome, known data gaps and limits.
+model scores and monthly intervals per biome, known data gaps (from the FIRMS Readme
+and the days a satellite was not observing, found in the data) and limits.
 
 Output: data/processed/<region>/serving/cell_day/year=YYYY/*.parquet, meta.json and
 cell_biome.parquet (copied, so the API needs only this folder).
@@ -30,6 +32,8 @@ from datetime import date
 from pathlib import Path
 
 import duckdb
+
+from pipeline.cube import date_runs, observation_gaps, sql_dates
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data"
@@ -68,9 +72,38 @@ KNOWN_GAPS = [
 LIMITS = {"max_area_cells": 50000, "max_map_cells": 20000, "max_day_buckets": 1000}
 METHOD = (
     "MODIS observed while MODIS delivers data; afterwards MODIS-equivalent expected fire "
-    "cell-days estimated from VIIRS (LightGBM cross-fitted by year blocks, calibrated per "
-    "biome, coverage gap added back)."
+    "cell-days estimated from VIIRS (LightGBM cross-fitted by year blocks on the years of "
+    "stable MODIS orbits, calibrated per biome, coverage gap added back)."
 )
+
+
+SENSOR = {s["name"]: s["sensor"] for s in SATELLITES}
+FULL_NAME = {"SNPP": "S-NPP", "N20": "NOAA-20", "N21": "NOAA-21"}
+
+
+def detected_gaps(gaps: dict[str, list[date]], estimate_from: set[str]) -> list[dict]:
+    """known_gaps entries for the days a satellite was not observing (from the data).
+
+    estimate_from: VIIRS satellites with an estimate, to say what covers an S-NPP gap."""
+    out = []
+    for sat in sorted(gaps, key=lambda s: (SENSOR.get(s, ""), s)):
+        name = FULL_NAME.get(sat, sat)
+        if SENSOR.get(sat) == "MODIS":
+            effect = "MODIS counts are low on these days; they are left out of the model."
+        elif sat == "SNPP" and "N20" in estimate_from:
+            effect = "the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+        else:
+            effect = "VIIRS counts are low on these days."
+        for a, b in date_runs(gaps[sat]):
+            out.append(
+                {
+                    "sensor": SENSOR.get(sat, sat),
+                    "period": str(a) if a == b else f"{a}/{b}",
+                    "note": f"No {name} detection in the whole region while other satellites "
+                    f"saw fire (satellite not observing); {effect}",
+                }
+            )
+    return out
 
 
 def build_serving(
@@ -96,8 +129,11 @@ def build_serving(
         GROUP BY cell_id, date
     """)
 
-    # VIIRS estimate: S-NPP first, NOAA-20 after the last S-NPP estimate.
-    est_parts, viirs_sources, est_last = [], [], None
+    # VIIRS estimate: S-NPP first; NOAA-20 after the last S-NPP estimate and on the
+    # days S-NPP was not observing (an outage would read as "no fire").
+    gaps = observation_gaps(region, data_dir)
+    est_parts, est_sats, viirs_sources, est_last = [], [], [], None
+    covered: list[str] = []  # SQL: the day already has an estimate from an earlier satellite
     for sat in ("SNPP", "N20"):
         d = harmonized / sat
         if not d.exists():
@@ -106,15 +142,20 @@ def build_serving(
         first, last = con.execute(
             f"SELECT CAST(min(date) AS DATE), CAST(max(date) AS DATE) FROM {src}"
         ).fetchone()
-        if est_last is not None and last <= est_last:
-            continue
-        lower = f"AND date > DATE '{est_last}'" if est_last else ""
+        est_sats.append(sat)
+        observing = f"CAST(date AS DATE) NOT IN ({sql_dates(gaps.get(sat, []))})"
+        free = " AND ".join(f"NOT ({c})" for c in covered) or "true"
         est_parts.append(
-            f"SELECT cell_id, CAST(date AS DATE) AS date, equiv FROM {src} WHERE equiv > 0 {lower}"
+            f"SELECT cell_id, CAST(date AS DATE) AS date, equiv FROM {src} "
+            f"WHERE equiv > 0 AND {observing} AND {free}"
         )
-        start = first if est_last is None else date.fromordinal(est_last.toordinal() + 1)
-        viirs_sources.append({"name": sat, "start": str(start), "end": str(last)})
-        est_last = last
+        covered.append(
+            f"CAST(date AS DATE) BETWEEN DATE '{first}' AND DATE '{last}' AND {observing}"
+        )
+        if est_last is None or last > est_last:
+            start = first if est_last is None else date.fromordinal(est_last.toordinal() + 1)
+            viirs_sources.append({"name": sat, "start": str(start), "end": str(last)})
+            est_last = last
     est_sql = (
         " UNION ALL ".join(est_parts)
         if est_parts
@@ -186,7 +227,7 @@ def build_serving(
             "test_metrics": scores,
             "interval_90_monthly_by_biome": intervals,
         },
-        "known_gaps": KNOWN_GAPS,
+        "known_gaps": KNOWN_GAPS + detected_gaps(gaps, estimate_from=set(est_sats)),
         "limits": LIMITS,
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")

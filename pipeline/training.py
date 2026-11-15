@@ -7,7 +7,8 @@ day?" (0/1), predicted only from what one VIIRS satellite saw plus context.
 One table per VIIRS satellite. Summing the VIIRS satellites is not stationary:
 NOAA-20 (2018) and NOAA-21 (2023) add pixels, so the same fire looks bigger
 later, and a model trained on 2012-2017 would never see them. For S-NPP alone,
-P(MODIS | S-NPP pixels) is stable from 2012 to 2026 in the Pantanal. Each table
+P(MODIS | S-NPP pixels) is stable while the MODIS orbits are (to 2021; see
+pipeline.harmonize for the drift after that). Each table
 uses rows, features and a time split from its own satellite:
 
 - SNPP: train 2012-2017, test 2018 onward
