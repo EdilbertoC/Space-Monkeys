@@ -139,3 +139,18 @@ def test_aggregate_cells_sums_into_the_coarse_cell_of_each_centre():
     assert coarse.loc[0, ["modis", "viirs", "harmonized"]].tolist() == [5, 9, 5.0]
     assert (coarse.loc[0, "lat"], coarse.loc[0, "lon"]) == (-17.5, -57.5)
     assert coarse["cell_id"].tolist() == [72 * 360 + 122, 74 * 360 + 124]
+
+
+def test_layers_add_up_and_carry_their_band():
+    cov = an.Coverage(**{**COV.__dict__, "layers": (date(2012, 1, 20), date(2026, 12, 31))})
+    d = daily("2025-01-01", "2025-01-03", modis=1.0, viirs=1.0, est=0.5)
+    d["fine"] = 0.25
+    (b,) = an.calendar(d, date(2025, 1, 1), date(2025, 1, 3), "month", cov, (0, 0), (-0.1, 0.2))
+    assert b["viirs_only"] == pytest.approx(0.75)
+    assert b["detected"]["value"] == pytest.approx(3 * (0.5 + 0.25))
+    assert b["detected"]["low"] == pytest.approx(2.25 * 0.9, abs=0.01)
+    assert b["detected"]["high"] == pytest.approx(2.25 * 1.2, abs=0.01)
+    early = daily("2011-12-01", "2011-12-03", modis=1.0)
+    early["fine"] = 0.0
+    (b,) = an.calendar(early, date(2011, 12, 1), date(2011, 12, 3), "month", cov, (0, 0))
+    assert b["viirs_only"] is None and b["detected"] is None  # before the layer: missing

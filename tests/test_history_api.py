@@ -3,6 +3,7 @@
 tests (one S-NPP detection on 2012-01-20; one fire on 2020-09-18 seen by S-NPP,
 NOAA-20 and Aqua). Every 200 response is checked against the contract schema."""
 
+import json
 from datetime import date
 
 import numpy as np
@@ -315,3 +316,72 @@ def test_anomaly_scan_route(client):
     assert month["start"] == "2020-09-01"
     assert month["class"] is None and month["reason"]  # too few base years in this table
     assert client.get("/history/anomalies", params={"year": 1999}).status_code == 422
+
+
+def test_viirs_only_layer_and_its_check(report_and_cube, tmp_path, monkeypatch):  # noqa: F811
+    """The VIIRS-only layer is 1 - p on the cell-days S-NPP saw, p = estimate / gap
+    factor; common + VIIRS-only is compared with what MODIS or S-NPP saw."""
+    fire, lone = cube.cell_id(*FIRE), cube.cell_id(*LONE)
+    box = {"Pantanal": shapely.box(-61, -16, -54, -14)}
+    labels = biomes.label_cells(np.array([fire, lone]), box)
+    labels.to_parquet(tmp_path / "processed" / "test" / "cell_biome.parquet", index=False)
+    harmonized = tmp_path / "processed" / "test" / "harmonized"
+    for year, cell, day, equiv in (
+        (2012, lone, "2012-01-20", 0.2),
+        (2020, fire, "2020-09-18", 0.5),
+    ):
+        d = harmonized / "SNPP" / f"year={year}"
+        d.mkdir(parents=True)
+        pd.DataFrame(
+            {"cell_id": [cell], "date": pd.to_datetime([day]), "equiv": [equiv]}
+        ).to_parquet(d / "harmonized.parquet", index=False)
+    gap_factors = {"Pantanal": {"1": 1.0, "9": 2.0}}
+    (harmonized / "SNPP_model.json").write_text(
+        json.dumps({"gap_factors": gap_factors, "scores_out_of_fold": {}, "interval_90": {}})
+    )
+    monkeypatch.setattr(serving, "observation_gaps", lambda region, data_dir: {})
+
+    meta = serving.build_serving("test", tmp_path)
+    served = pd.read_parquet(tmp_path / "processed" / "test" / "serving" / "cell_day")
+    fine = {
+        str(pd.Timestamp(r.date).date()): r.fine for r in served.itertuples() if r.fine == r.fine
+    }
+    # 2012-01-20: p = 0.2 / 1.0; 2020-09-18: p = 0.5 / 2.0
+    assert fine == pytest.approx({"2012-01-20": 0.8, "2020-09-18": 0.75})
+    layers = meta["harmonization"]["layers"]
+    assert layers["status"] == "available" and layers["satellites"] == ["SNPP"]
+    assert (layers["start"], layers["end"]) == ("2012-01-20", "2020-09-18")
+    total = layers["check"]["total"]
+    assert total["observed_union"] == 2  # S-NPP alone in 2012, S-NPP and Aqua in 2020
+    assert total["expected"] == pytest.approx(0.2 + 0.5 + 0.8 + 0.75)
+    assert total["monthly_wape"] == pytest.approx(0.25 / 2)
+    conforms(meta, "Meta")
+
+    monkeypatch.setenv("ENABLE_WORKER", "false")
+    monkeypatch.setenv("HISTORY_DATA_DIR", str(tmp_path / "processed" / "test" / "serving"))
+    get_settings.cache_clear()
+    from app.main import create_app
+
+    with TestClient(create_app()) as c:
+        body = c.get(
+            "/history/calendar",
+            params={"bbox": "-61,-16,-54,-14", "start": "2020-09-14", "end": "2020-09-20"},
+        ).json()
+        conforms(body, "Calendar")
+        b = next(b for b in body["buckets"] if b["start"] <= "2020-09-18" <= b["end"])
+        assert b["viirs_only"] == pytest.approx(0.75)
+        assert b["detected"]["value"] == pytest.approx(0.5 + 0.75)
+        # too few months here for a band: the interval collapses to the value
+        assert b["detected"]["low"] == b["detected"]["high"] == b["detected"]["value"]
+        cells = c.get(
+            "/history/map",
+            params={"bbox": "-61,-16,-54,-14", "start": "2020-09-01", "end": "2020-09-30"},
+        ).json()
+        conforms(cells, "Map")
+        assert [x["viirs_only"] for x in cells["cells"]] == pytest.approx([0.75])
+        assert b["harmonized"]["value"] == 1  # MODIS observed (Aqua) is still served
+        r = c.get("/history/trend", params={"bbox": "-61,-16,-54,-14", "series": "detected"})
+        assert r.status_code == 200  # comparable across years: one satellite at a time
+        annual = r.json()["annual"]  # complete years inside the layer: 2013 to 2019
+        assert (annual[0]["year"], annual[-1]["year"]) == (2013, 2019)
+    get_settings.cache_clear()

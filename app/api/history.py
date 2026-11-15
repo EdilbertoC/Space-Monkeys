@@ -15,7 +15,7 @@ from app.history.store import Area, AreaError, AreaTooLarge, HistoryStore
 router = APIRouter(prefix="/history", tags=["history"])
 
 Biome = Literal["Amazon", "Caatinga", "Cerrado", "Atlantic Forest", "Pampa", "Pantanal"]
-Series = Literal["harmonized", "modis", "viirs"]
+Series = Literal["harmonized", "modis", "viirs", "viirs_only", "detected"]
 
 
 def get_store(request: Request) -> HistoryStore:
@@ -65,6 +65,12 @@ def _check_series(store: HistoryStore, series: str) -> None:
         raise HTTPException(422, VIIRS_NOT_COMPARABLE)
     if series == "harmonized" and store.meta["harmonization"]["status"] != "available":
         raise HTTPException(409, "harmonized series not available yet; use series=modis")
+    if series in ("viirs_only", "detected") and store.coverage.layers is None:
+        raise HTTPException(
+            409,
+            "the VIIRS-only layer is not in this serving table; rebuild it with "
+            "`python -m pipeline.serving` after pipeline.harmonize",
+        )
 
 
 def _span(store: HistoryStore, series: str) -> tuple[date, date]:
@@ -73,6 +79,8 @@ def _span(store: HistoryStore, series: str) -> tuple[date, date]:
         return cov.modis
     if series == "viirs":
         return cov.viirs
+    if series in ("viirs_only", "detected"):
+        return cov.layers
     end = cov.harmonized_modis_end()
     if cov.estimate is not None:
         end = max(end, cov.estimate[1])
@@ -81,6 +89,9 @@ def _span(store: HistoryStore, series: str) -> tuple[date, date]:
 
 def _base(store: HistoryStore, series: str, start: int | None, end: int | None) -> range:
     first = start if start is not None else 2003
+    if start is None and series in ("viirs_only", "detected"):
+        s = _span(store, series)[0]  # the first complete year of the layer
+        first = s.year if (s.month, s.day) == (1, 1) else s.year + 1
     last = end if end is not None else an.last_complete_year(_span(store, series)[1])
     if last < first:
         raise HTTPException(422, "base_end_year must not be before base_start_year")
@@ -143,11 +154,12 @@ def calendar(
         raise HTTPException(413, f"more than {store.limits['max_day_buckets']} daily buckets")
     daily = store.daily(area, start, end)
     band = _band(store, area)
+    det_band = store.detected_band(area) if store.coverage.layers else (0.0, 0.0)
     return {
         "area": area.as_summary(),
         "unit": "fire_cell_days",
         "granularity": granularity,
-        "buckets": an.calendar(daily, start, end, granularity, store.coverage, band),
+        "buckets": an.calendar(daily, start, end, granularity, store.coverage, band, det_band),
     }
 
 
@@ -306,6 +318,7 @@ def fire_map(
     cov = store.coverage
     has_modis = start <= cov.modis[1] and end >= cov.modis[0]
     has_viirs = start <= cov.viirs[1] and end >= cov.viirs[0]
+    has_layer = cov.layers is not None and start <= cov.layers[1] and end >= cov.layers[0]
     out = [
         {
             "cell_id": int(r.cell_id),
@@ -314,6 +327,7 @@ def fire_map(
             "harmonized": round(float(r.harmonized), 2),
             "modis": int(r.modis) if has_modis else None,
             "viirs": int(r.viirs) if has_viirs else None,
+            "viirs_only": round(float(r.viirs_only), 2) if has_layer else None,
         }
         for r in cells.itertuples(index=False)
     ]
