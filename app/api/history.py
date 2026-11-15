@@ -31,15 +31,18 @@ def get_area(
     bbox: tuple[float, float, float, float] | None = Depends(parse_bbox),
     biome: Biome | None = Query(None, description="A Brazilian biome (IBGE 2019)."),
     area_id: str | None = Query(None, description="Id returned by POST /history/areas."),
+    country: Literal["BR"] | None = Query(None, description="A whole country: BR (Brazil)."),
     store: HistoryStore = Depends(get_store),
 ) -> Area:
-    if sum(v is not None for v in (bbox, biome, area_id)) != 1:
-        raise HTTPException(400, "give exactly one of bbox, biome, area_id")
+    if sum(v is not None for v in (bbox, biome, area_id, country)) != 1:
+        raise HTTPException(400, "give exactly one of bbox, biome, area_id, country")
     try:
         if bbox is not None:
             return store.area_from_bbox(bbox)
         if biome is not None:
             return store.area_from_biome(biome)
+        if country is not None:
+            return store.area_from_country(country)
         return store.area_from_id(area_id)
     except AreaTooLarge as exc:
         raise HTTPException(413, str(exc)) from exc
@@ -82,6 +85,11 @@ def _base(store: HistoryStore, series: str, start: int | None, end: int | None) 
     if last < first:
         raise HTTPException(422, "base_end_year must not be before base_start_year")
     return range(first, last + 1)
+
+
+def _band(store: HistoryStore, area: Area) -> tuple[float, float]:
+    """Relative 90% band of the VIIRS estimate for this area (0, 0 without an estimate)."""
+    return store.estimate_band(area) if store.coverage.estimate else (0.0, 0.0)
 
 
 def _values(store: HistoryStore, area: Area, series: str, start: date, end: date):
@@ -134,7 +142,7 @@ def calendar(
     if granularity == "day" and (end - start).days + 1 > store.limits["max_day_buckets"]:
         raise HTTPException(413, f"more than {store.limits['max_day_buckets']} daily buckets")
     daily = store.daily(area, start, end)
-    band = store.estimate_band(area) if store.coverage.estimate else (0.0, 0.0)
+    band = _band(store, area)
     return {
         "area": area.as_summary(),
         "unit": "fire_cell_days",
@@ -184,13 +192,54 @@ def anomaly(
     last = max(date(base.stop - 1, 12, 31), end)
     values = _values(store, area, series, first, last)
     result = _analytics(an.anomaly, values, start, end, base)
+    interval = None
+    if series == "harmonized":
+        interval = an.harmonized_interval(
+            store.daily(area, start, end), start, end, store.coverage, _band(store, area)
+        )
     return {
         "area": area.as_summary(),
         "unit": "fire_cell_days",
         "series": series,
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         **result,
-        "value_interval": None,
+        "value_interval": interval,
+    }
+
+
+@router.get("/anomalies", summary="Every month of a year against normal, for many areas")
+def anomalies(
+    year: int = Query(..., ge=2001),
+    series: Series = "harmonized",
+    areas: Literal["biomes", "biomes+country"] = "biomes",
+    base_start_year: int | None = None,
+    base_end_year: int | None = None,
+    store: HistoryStore = Depends(get_store),
+) -> dict:
+    """One call instead of one per area and month: each month of `year` in every biome
+    (and Brazil) compared with the same dates in the base years."""
+    _check_series(store, series)
+    base = _base(store, series, base_start_year, base_end_year)
+    last_day = _span(store, series)[1]
+    if date(year, 1, 1) > last_day or year < _span(store, series)[0].year:
+        raise HTTPException(422, f"no {series} data in {year}")
+    targets = [store.area_from_biome(b) for b in store.biome_cells]
+    if areas == "biomes+country":
+        targets.append(store.area_from_country("BR"))
+    first = date(min(base.start, year), 1, 1)
+    last = date(max(base.stop - 1, year), 12, 31)
+    rows = []
+    for area in targets:
+        values = _values(store, area, series, first, last)
+        rows.append(
+            {"area": area.as_summary(), "months": an.anomaly_scan(values, year, base, last_day)}
+        )
+    return {
+        "unit": "fire_cell_days",
+        "series": series,
+        "year": year,
+        "base_years": [base.start, base.stop - 1],
+        "areas": rows,
     }
 
 
@@ -227,40 +276,51 @@ def trend(
     return {"area": area.as_summary(), "unit": "fire_cell_days", "series": series, **result}
 
 
+MAP_DEGREES = (0.1, 0.25, 0.5, 1.0)
+
+
 @router.get("/map", summary="Fire cell-days per cell in a period")
 def fire_map(
     start: date,
     end: date,
+    cell_degrees: Literal["0.1", "0.25", "0.5", "1", "auto"] = Query(
+        "0.1",
+        description="Grid of the answer. Coarser cells sum the 0.1° cells inside them; "
+        "`auto` picks the finest grid within the cell limit.",
+    ),
     area: Area = Depends(get_area),
     store: HistoryStore = Depends(get_store),
 ) -> dict:
     if end < start:
         raise HTTPException(422, "end must not be before start")
-    cells = store.per_cell(area, start, end)
-    if len(cells) > store.limits["max_map_cells"]:
-        raise HTTPException(
-            413, f"{len(cells)} cells with fire; the limit is {store.limits['max_map_cells']}"
-        )
+    limit = store.limits["max_map_cells"]
+    fine = store.per_cell(area, start, end)
+    options = MAP_DEGREES if cell_degrees == "auto" else (float(cell_degrees),)
+    for degrees in options:
+        cells = an.aggregate_cells(fine, degrees)
+        if len(cells) <= limit:
+            break
+    else:
+        hint = "" if cell_degrees == "auto" else "; try a coarser cell_degrees or auto"
+        raise HTTPException(413, f"{len(cells)} cells with fire; the limit is {limit}{hint}")
     cov = store.coverage
     has_modis = start <= cov.modis[1] and end >= cov.modis[0]
     has_viirs = start <= cov.viirs[1] and end >= cov.viirs[0]
-    out = []
-    for cell_id, modis, viirs, harm in cells.itertuples(index=False):
-        r, c = int(cell_id) // 3600, int(cell_id) % 3600
-        out.append(
-            {
-                "cell_id": int(cell_id),
-                "lat": round(r / 10 - 90 + 0.05, 2),
-                "lon": round(c / 10 - 180 + 0.05, 2),
-                "harmonized": round(float(harm), 2),
-                "modis": int(modis) if has_modis else None,
-                "viirs": int(viirs) if has_viirs else None,
-            }
-        )
+    out = [
+        {
+            "cell_id": int(r.cell_id),
+            "lat": float(r.lat),
+            "lon": float(r.lon),
+            "harmonized": round(float(r.harmonized), 2),
+            "modis": int(r.modis) if has_modis else None,
+            "viirs": int(r.viirs) if has_viirs else None,
+        }
+        for r in cells.itertuples(index=False)
+    ]
     return {
         "area": area.as_summary(),
         "unit": "fire_cell_days",
-        "grid_degrees": 0.1,
+        "grid_degrees": degrees,
         "period": {"start": start.isoformat(), "end": end.isoformat()},
         "cells": out,
     }

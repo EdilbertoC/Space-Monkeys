@@ -320,3 +320,71 @@ def trend(values: pd.Series, start_year: int, end_year: int) -> dict:
 
 def last_complete_year(span_end: date) -> int:
     return span_end.year if (span_end.month, span_end.day) == (12, 31) else span_end.year - 1
+
+
+# ---- intervals -------------------------------------------------------------------
+def harmonized_interval(
+    daily: pd.DataFrame, start: date, end: date, cov: Coverage, band: tuple[float, float]
+) -> dict | None:
+    """90% interval of the harmonized total over [start, end], built like a calendar
+    bucket: MODIS days are exact, the VIIRS-estimate part gets the per-biome band of the
+    model's out-of-sample errors on monthly totals."""
+    h = series_values(daily, "harmonized", cov).loc[pd.Timestamp(start) : pd.Timestamp(end)]
+    value = _sum(h["value"])
+    if value is None:
+        return None
+    est = float(h["est_part"].sum())
+    exact = value - est
+    return {
+        "value": round(value, 2),
+        "low": round(exact + est * (1 + band[0]), 2),
+        "high": round(exact + est * (1 + band[1]), 2),
+    }
+
+
+# ---- anomaly scan ----------------------------------------------------------------
+def anomaly_scan(values: pd.Series, year: int, base: range, last_day: date) -> list[dict]:
+    """Every month of `year` compared with the same dates in the base years (see
+    `anomaly`). A month still in progress is compared up to `last_day` only and is
+    flagged `partial`; months that cannot be assessed carry a `reason` and no class."""
+    out = []
+    for month in range(1, 13):
+        start = date(year, month, 1)
+        end = date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1)
+        if start > last_day:
+            break
+        partial = end > last_day
+        end = min(end, last_day)
+        row: dict = {"start": start.isoformat(), "end": end.isoformat(), "partial": partial}
+        try:
+            row.update(anomaly(values, start, end, base))
+            del row["excluded_years"]
+        except AnalyticsError as exc:
+            row.update({"class": None, "reason": str(exc)})
+        out.append(row)
+    return out
+
+
+# ---- map aggregation -------------------------------------------------------------
+
+
+def aggregate_cells(cells: pd.DataFrame, degrees: float) -> pd.DataFrame:
+    """Sum 0.1° cells (`cell_id`, `modis`, `viirs`, `harmonized`) into a coarser grid of
+    `degrees`, assigning each 0.1° cell by its centre. The values stay fire cell-days of
+    0.1° cells, so a coarse cell's value is the sum over the 0.1° cells inside it.
+    Returns `cell_id` (row * n_cols + col of the coarse grid), `lat`, `lon` (centre)."""
+    lat = (cells["cell_id"] // 3600) / 10 - 90 + 0.05
+    lon = (cells["cell_id"] % 3600) / 10 - 180 + 0.05
+    if degrees == 0.1:
+        out = cells.copy()
+        out["lat"], out["lon"] = lat.round(2), lon.round(2)
+        return out
+    n_cols = int(round(360 / degrees))
+    row = np.floor((lat + 90) / degrees).astype(int)
+    col = np.floor((lon + 180) / degrees).astype(int)
+    frame = cells.assign(coarse=row * n_cols + col)
+    out = frame.groupby("coarse", as_index=False)[["modis", "viirs", "harmonized"]].sum()
+    out = out.rename(columns={"coarse": "cell_id"})
+    out["lat"] = ((out["cell_id"] // n_cols) * degrees - 90 + degrees / 2).round(3)
+    out["lon"] = ((out["cell_id"] % n_cols) * degrees - 180 + degrees / 2).round(3)
+    return out

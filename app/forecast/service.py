@@ -136,3 +136,34 @@ class ForecastService:
             "min_p": min_p,
             "cells": cells,
         }
+
+    def region_summary(self, labels: np.ndarray, names: list[str]) -> dict:
+        """Per region and day: the expected number of 0.25° cells with at least one VIIRS
+        fire detection (the sum of the cells' probabilities) and the number of cells at
+        50% or more. Only forecast cells (the mask, or anchored) count."""
+        f = self.current
+        if f is None:
+            raise LookupError(self.last_error or "No forecast yet")
+        valid = self.model.mask | f.anchored
+
+        def row(kind: str, name: str, cells: np.ndarray) -> dict:
+            p = f.final[:, cells]  # (leads, n)
+            return {
+                "kind": kind,
+                "name": name,
+                "cells": int(cells.sum()),
+                "expected_fire_cells": [round(float(v), 1) for v in p.sum(axis=1)],
+                "cells_at_least_50": [int(v) for v in (p >= 0.5).sum(axis=1)],
+            }
+
+        regions = [row("biome", n, valid & (labels == i)) for i, n in enumerate(names)]
+        regions.append(row("country", "Brazil", valid & (labels >= 0)))
+        return {
+            "model": self.model.name,
+            "issued_for": f.issued_for.isoformat(),
+            "valid_dates": [d.isoformat() for d in f.valid_dates],
+            "generated_at": f.generated_at.isoformat(),
+            "anchored_at": f.anchored_at.isoformat() if f.anchored_at else None,
+            "resolution_deg": self.model.grid.res,
+            "regions": regions,
+        }

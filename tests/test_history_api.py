@@ -260,3 +260,58 @@ def test_serving_uses_noaa20_when_snpp_was_not_observing(report_and_cube, tmp_pa
     assert (gap["sensor"], gap["period"]) == ("VIIRS", "2020-09-19")
     assert "NOAA-20" in gap["note"]
     conforms(meta, "Meta")
+
+
+def test_country_area_is_brazil(client):
+    r = client.get(
+        "/history/calendar",
+        params={
+            "country": "BR",
+            "start": "2020-09-01",
+            "end": "2020-09-30",
+            "granularity": "month",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    conforms(body, "Calendar")
+    assert body["area"] == {"kind": "country", "cells": 18, "country": "BR"}
+    assert body["buckets"][0]["modis"] == 1
+    two = client.get(
+        "/history/calendar",
+        params={"country": "BR", "biome": "Pantanal", "start": "2020-09-01", "end": "2020-09-30"},
+    )
+    assert two.status_code == 400
+
+
+def test_cached_series_match_a_direct_query(client):
+    store = client.app.state.history
+    area = store.area_from_biome("Pantanal")
+    start, end = date(2020, 9, 1), date(2020, 9, 30)
+    direct = store._query_daily(area, start, end)
+    cached = store.daily(area, start, end)  # biomes read and cache the whole record
+    pd.testing.assert_frame_equal(direct, cached, check_freq=False)
+    assert area.predicate in store._series
+
+
+def test_map_can_be_coarser(client):
+    params = {"biome": "Pantanal", "start": "2020-09-01", "end": "2020-09-30"}
+    fine = client.get("/history/map", params=params).json()
+    coarse = client.get("/history/map", params={**params, "cell_degrees": "1"}).json()
+    auto = client.get("/history/map", params={**params, "cell_degrees": "auto"}).json()
+    conforms(coarse, "Map")
+    assert coarse["grid_degrees"] == 1.0 and auto["grid_degrees"] == 0.1
+    assert sum(c["modis"] for c in coarse["cells"]) == sum(c["modis"] for c in fine["cells"])
+    assert client.get("/history/map", params={**params, "cell_degrees": "2"}).status_code == 422
+
+
+def test_anomaly_scan_route(client):
+    r = client.get("/history/anomalies", params={"year": 2020, "areas": "biomes+country"})
+    assert r.status_code == 200
+    body = r.json()
+    conforms(body, "AnomalyScan")
+    assert [a["area"]["kind"] for a in body["areas"]] == ["biome", "country"]
+    month = body["areas"][0]["months"][8]  # September 2020
+    assert month["start"] == "2020-09-01"
+    assert month["class"] is None and month["reason"]  # too few base years in this table
+    assert client.get("/history/anomalies", params={"year": 1999}).status_code == 422

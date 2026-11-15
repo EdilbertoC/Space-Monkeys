@@ -84,3 +84,58 @@ def test_trend_detects_a_steady_rise():
 def test_last_complete_year():
     assert an.last_complete_year(date(2026, 11, 14)) == 2025
     assert an.last_complete_year(date(2025, 12, 31)) == 2025
+
+
+def test_harmonized_interval_is_exact_on_modis_days_and_banded_on_the_estimate():
+    d = daily("2026-12-01", "2026-12-31", modis=2.0, est=4.0)
+    cov = an.Coverage(
+        modis=(date(2000, 11, 1), date(2026, 12, 15)),
+        viirs=(date(2012, 1, 20), date(2026, 12, 31)),
+        estimate=(date(2012, 1, 20), date(2026, 12, 31)),
+        switch_date=None,
+        standard_until=date(2026, 8, 31),
+    )
+    exact = an.harmonized_interval(d, date(2026, 12, 1), date(2026, 12, 10), cov, (-0.2, 0.3))
+    assert exact == {"value": 20.0, "low": 20.0, "high": 20.0}
+    mixed = an.harmonized_interval(d, date(2026, 12, 14), date(2026, 12, 17), cov, (-0.2, 0.3))
+    # 2 MODIS days (2 each) + 2 estimate days (4 each): 4 exact + 8 estimated.
+    assert mixed == {"value": 12.0, "low": 4 + 8 * 0.8, "high": 4 + 8 * 1.3}
+
+
+def test_anomaly_scan_flags_the_month_in_progress():
+    idx = pd.date_range("2003-01-01", "2012-06-10", freq="D")
+    v = pd.Series(1.0, index=idx)
+    months = an.anomaly_scan(v, 2012, range(2003, 2012), date(2012, 6, 10))
+    assert [m["start"] for m in months][-1] == "2012-06-01"
+    assert months[-1]["partial"] and months[-1]["end"] == "2012-06-10"
+    assert not months[0]["partial"]
+    assert all(m["class"] == "normal" for m in months)
+    assert "excluded_years" not in months[0]
+
+
+def test_anomaly_scan_gives_a_reason_instead_of_a_class():
+    v = pd.Series(1.0, index=pd.date_range("2011-01-01", "2012-12-31", freq="D"))
+    months = an.anomaly_scan(v, 2012, range(2011, 2012), date(2012, 12, 31))
+    assert len(months) == 12
+    assert months[0]["class"] is None and "base years" in months[0]["reason"]
+
+
+def test_aggregate_cells_sums_into_the_coarse_cell_of_each_centre():
+    def cid(lat, lon):  # 0.1° cell holding (lat, lon)
+        return int((lat + 90) * 10) * 3600 + int((lon + 180) * 10)
+
+    cells = pd.DataFrame(
+        {
+            "cell_id": [cid(-17.55, -57.05), cid(-17.65, -57.15), cid(-15.05, -55.05)],
+            "modis": [2, 3, 1],
+            "viirs": [4, 5, 1],
+            "harmonized": [2.0, 3.0, 1.0],
+        }
+    )
+    same = an.aggregate_cells(cells, 0.1)
+    assert list(same["lat"]) == [-17.55, -17.65, -15.05]
+    coarse = an.aggregate_cells(cells, 1.0).sort_values("lat").reset_index(drop=True)
+    assert len(coarse) == 2  # the two Pantanal cells share the 1° cell (-18..-17, -58..-57)
+    assert coarse.loc[0, ["modis", "viirs", "harmonized"]].tolist() == [5, 9, 5.0]
+    assert (coarse.loc[0, "lat"], coarse.loc[0, "lon"]) == (-17.5, -57.5)
+    assert coarse["cell_id"].tolist() == [72 * 360 + 122, 74 * 360 + 124]

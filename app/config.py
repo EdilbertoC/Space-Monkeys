@@ -47,6 +47,8 @@ class Settings(BaseSettings):
 
     # Burning activity calendar: folder written by `python -m pipeline.serving`
     history_data_dir: Path = Path("data/processed/brazil/serving")
+    # Cache the daily series of every biome and of Brazil in the background at start-up.
+    history_warm_up: bool = True
 
     # Fire forecast (U-Net, see notebooks/fire_forecast_base.py)
     enable_forecast: bool = True
