@@ -130,6 +130,9 @@ The backend serves the Brazil model from [`models/fire_forecast_brazil/`](models
 | Persistence | 0.154 | 0.0497 |
 | **U-Net (Brazil, VIIRS)** | **0.396** | **0.0434** |
 | U-Net (world + MODIS) | 0.379 | 0.0438 |
+| U-Net (Brazil + MODIS + rich inputs + weather, ensemble of 3) | 0.402 | 0.0428 |
+
+The last row is an experiment, not the served model. Adding MODIS history, FRP, night-time detections, weather up to the forecast day and a 3-model ensemble moved average precision from 0.396 to 0.402, which is within the run-to-run variation of one model (about 0.005–0.01). With 11 years of training data the count-only model already captures most of what these inputs add. The served model stays the simpler one. What the model lacks is information about the coming days: a short test that fed the observed weather of the target days (`FUTURE_WEATHER`, a perfect weather forecast) showed a much larger gain, but it has not been run at full scale and needs a weather-forecast feed (NOAA GFS) to be usable.
 
 How a forecast is made:
 
