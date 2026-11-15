@@ -24,6 +24,27 @@ def test_ibge_codes_have_english_names():
     assert biomes.BIOMES[6] == "Pantanal"
 
 
+def test_admin1_keeps_one_country_and_merges_small_territories(tmp_path):
+    shapefile = pytest.importorskip("shapefile")
+    path = tmp_path / "admin1"
+    with shapefile.Writer(str(path), shapeType=shapefile.POLYGON) as w:
+        w.field("admin", "C")
+        w.field("name", "C")
+        for admin, name, (x0, y0) in [
+            ("Australia", "New South Wales", (0, 0)),
+            ("Australia", "Australian Capital Territory", (1, 0)),
+            ("Australia", "Tasmania", (0, 5)),
+            ("New Zealand", "Otago", (9, 9)),
+        ]:
+            w.poly([[[x0, y0], [x0, y0 + 1], [x0 + 1, y0 + 1], [x0 + 1, y0], [x0, y0]]])
+            w.record(admin, name)
+    regions = biomes.load_admin1(path.with_suffix(".shp"), "Australia")
+    assert sorted(regions) == ["New South Wales", "Tasmania"]
+    assert regions["New South Wales"].area == pytest.approx(2.0)  # the territory merged in
+    with pytest.raises(ValueError):
+        biomes.load_admin1(path.with_suffix(".shp"), "Chile")
+
+
 def test_label_cells_uses_the_cell_centre():
     box = shapely.box(-56.0, -15.5, -55.0, -15.0)  # lon/lat
     inside, outside = cube.cell_id(*FIRE), cube.cell_id(*LONE)

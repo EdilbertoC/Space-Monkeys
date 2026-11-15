@@ -35,9 +35,17 @@ After the reference years the report compares the estimate with observed MODIS
 (`after_reference`). That difference is not a model error: it mixes the forward
 error with the change in MODIS itself.
 
+5. Beyond the training table: the training table stops on the last day with
+   standard processing for both MODIS and the satellite. The days after it (the
+   satellite's NRT days now, every day once MODIS ends) come from the application
+   table (pipeline.training --application), picked and described from VIIRS alone,
+   and get the final model with the same calibration and gap (`applied` in the
+   report; `--apply-only` redoes just this step when new VIIRS days arrive).
+
 Outputs (data/processed/<region>/harmonized/):
 - <SAT>/year=YYYY/*.parquet: cell_id, date, biome, modis (observed 0/1), equiv
-  (MODIS-equivalent expected fire-days, after calibration and gap)
+  (MODIS-equivalent expected fire-days, after calibration and gap); applied.parquet
+  holds the days after the training table (modis NULL)
 - <SAT>_monthly.parquet: per biome and month: MODIS observed, VIIRS naive
   (fire cell-days seen by the satellite), estimate, interval
 - <SAT>_model.json: folds, calibrators, gap factors, intervals, scores on the
@@ -51,6 +59,7 @@ Usage::
 
     python -m pipeline.harmonize brazil --satellite SNPP
     python -m pipeline.harmonize brazil --satellite N20
+    python -m pipeline.harmonize brazil --satellite SNPP --apply-only
 """
 
 from __future__ import annotations
@@ -59,7 +68,7 @@ import argparse
 import json
 import os
 import shutil
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
@@ -357,7 +366,9 @@ def intervals(monthly: pd.DataFrame) -> dict[str, list[float]]:
     return out
 
 
-def score(monthly: pd.DataFrame) -> dict:
+def score(monthly: pd.DataFrame, total: str = "Brazil") -> dict:
+    """Scores per biome and for the whole region, keyed `total` (its name, e.g. Brazil)."""
+
     def one(g: pd.DataFrame) -> dict:
         m, e, v = g["modis"], g["estimate"], g["viirs_naive"]
         return {
@@ -369,11 +380,11 @@ def score(monthly: pd.DataFrame) -> dict:
         }
 
     whole = monthly.groupby(["year", "month"])[["modis", "estimate", "viirs_naive"]].sum()
-    out = {"Brazil": one(whole)}
+    out = {total: one(whole)}
     for b, g in monthly.groupby("biome"):
         out[str(b)] = one(g)
     yearly = monthly.groupby("year")[["modis", "estimate", "viirs_naive"]].sum()
-    out["Brazil"]["by_year"] = [
+    out[total]["by_year"] = [
         {
             "year": int(y),
             "modis": int(r["modis"]),
@@ -383,6 +394,110 @@ def score(monthly: pd.DataFrame) -> dict:
         for y, r in yearly.iterrows()
     ]
     return out
+
+
+def equivalent(
+    raw: np.ndarray,
+    biome: np.ndarray,
+    month: np.ndarray,
+    calibrators: dict,
+    gaps: dict[str, dict[int, float]],
+) -> np.ndarray:
+    """MODIS-equivalent expected fire-days per row: calibrated per biome, times the
+    coverage gap of its biome and calendar month."""
+    out = np.zeros(len(raw), dtype=np.float32)
+    for b, idx in pd.Series(biome).groupby(biome).indices.items():
+        g = np.array([gaps.get(b, {}).get(m, 1.0) for m in range(1, 13)])
+        p = baselines.apply_calibration(raw[idx], calibrators.get(b))
+        out[idx] = p * g[month[idx] - 1]
+    return out
+
+
+def apply_after_training(
+    data_dir: Path,
+    region: str,
+    satellite: str,
+    model: dict,
+    threads: int = 0,
+) -> dict | None:
+    """The estimate where the training table cannot reach (pipeline.training
+    --application): the final model with the reference calibration and gap, on rows
+    picked from VIIRS alone. Written next to the harmonized rows as applied.parquet
+    (modis is NULL: not used). Returns what was applied, or None without a table.
+
+    `model` is the harmonization report (<SAT>_model.json): its period end is the
+    last day of the training table, and only later days are applied."""
+    app_dir = data_dir / "processed" / region / "application" / satellite
+    sat_dir = data_dir / "processed" / region / "harmonized" / satellite
+    for old in sat_dir.glob("year=*/applied.parquet"):
+        old.unlink()
+    files = list(app_dir.glob("**/*.parquet"))
+    if not files:
+        return None
+    after = model["period"][1]
+    next_day = date.fromisoformat(after) + timedelta(days=1)
+    src = f"read_parquet('{app_dir.as_posix()}/**/*.parquet', hive_partitioning = true)"
+    con = duckdb.connect()
+    first = con.execute(f"SELECT CAST(min(date) AS DATE) FROM {src}").fetchone()[0]
+    if first > next_day:
+        raise ValueError(
+            f"the application table starts on {first}, but the harmonized rows end on "
+            f"{after}; rebuild it with `python -m pipeline.training {region} "
+            f"--satellite {satellite} --application`"
+        )
+    booster, w, _ = baselines.load_lightgbm(_fold_dir(data_dir, region, satellite) / FINAL)
+    calibrators = model["calibrators"]
+    gaps = {b: {int(m): f for m, f in g.items()} for b, g in model["gap_factors"].items()}
+    years = [
+        r[0]
+        for r in con.execute(
+            f"SELECT DISTINCT year FROM {src} WHERE date > DATE '{after}' ORDER BY 1"
+        ).fetchall()
+    ]
+    rows, total, last = 0, 0.0, None
+    for yr in years:
+        df = con.execute(f"""
+            SELECT cell_id, date, biome, {", ".join(FEATURES)}
+            FROM {src}
+            WHERE year = {yr} AND date > DATE '{after}' AND biome IS NOT NULL
+        """).fetchdf()
+        if df.empty:
+            continue
+        raw = baselines.unweight(booster.predict(df[FEATURES], num_threads=threads), w)
+        dates = pd.to_datetime(df["date"])
+        equiv = equivalent(
+            raw, df["biome"].astype(str).to_numpy(), dates.dt.month.to_numpy(), calibrators, gaps
+        )
+        keep = equiv >= EQUIV_FLOOR
+        part = sat_dir / f"year={yr}"
+        part.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "cell_id": df["cell_id"].to_numpy(np.int64)[keep],
+                "date": dates.to_numpy()[keep],
+                "biome": df["biome"].astype(str).to_numpy()[keep],
+                "modis": pd.array([pd.NA] * int(keep.sum()), dtype="Int8"),
+                "equiv": equiv[keep],
+            }
+        ).to_parquet(part / "applied.parquet", index=False)
+        rows += int(keep.sum())
+        total += float(equiv.sum())
+        last = max(last, dates.max().date()) if last else dates.max().date()
+        del df, raw, equiv
+    if last is None:
+        return None
+    report = json.loads(
+        (data_dir / "processed" / region / "application" / f"{satellite}_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return {
+        "period": [str(next_day), str(last)],
+        "standard_until": report.get("standard_until"),
+        "rows_written": rows,
+        "estimate": round(total, 1),
+        "model": FINAL,
+    }
 
 
 def run(
@@ -419,11 +534,9 @@ def run(
     for yr in years:
         df = pd.read_parquet(raw_dir / f"year={yr}" / "raw.parquet")
         month = pd.to_datetime(df["date"]).dt.month.to_numpy()
-        equiv = np.zeros(len(df), dtype=np.float32)
-        for b, idx in df.groupby("biome").indices.items():
-            g = np.array([gaps.get(b, {}).get(m, 1.0) for m in range(1, 13)])
-            p = baselines.apply_calibration(df["raw"].to_numpy()[idx], calibrators.get(b))
-            equiv[idx] = p * g[month[idx] - 1]
+        equiv = equivalent(
+            df["raw"].to_numpy(), df["biome"].astype(str).to_numpy(), month, calibrators, gaps
+        )
         df["equiv"], df["month"], df["year"] = equiv, month, yr
         sums.append(df.groupby(["biome", "year", "month"])["equiv"].sum().rename("estimate"))
         keep = df[(df["equiv"] >= EQUIV_FLOOR) | (df["y"] == 1)].rename(columns={"y": "modis"})
@@ -455,12 +568,27 @@ def run(
         "folds": fold_info,
         "gap_factors": gaps,
         "interval_90": q,
-        "scores_out_of_fold": score(reference),
-        "after_reference": score(later) if len(later) else None,
+        "total": region.title(),
+        "scores_out_of_fold": score(reference, region.title()),
+        "after_reference": score(later, region.title()) if len(later) else None,
         "calibrators": calibrators,
     }
+    report["applied"] = apply_after_training(data_dir, region, satellite, report, threads)
     (out / f"{satellite}_model.json").write_text(json.dumps(report), encoding="utf-8")
     return report
+
+
+def run_apply(
+    region: str, data_dir: Path = DEFAULT_DATA_DIR, satellite: str = "SNPP", threads: int = 0
+) -> dict | None:
+    """Apply the saved harmonization to a new application table, without refitting."""
+    path = data_dir / "processed" / region / "harmonized" / f"{satellite}_model.json"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found; run `python -m pipeline.harmonize {region}`")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    report["applied"] = apply_after_training(data_dir, region, satellite, report, threads)
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return report["applied"]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -470,7 +598,24 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     parser.add_argument("--retrain", action="store_true", help="retrain folds already saved")
+    parser.add_argument(
+        "--apply-only",
+        action="store_true",
+        help="only apply the saved model to the application table (pipeline.training "
+        "--application), e.g. after new VIIRS days arrive",
+    )
     args = parser.parse_args(argv)
+    if args.apply_only:
+        a = run_apply(args.region, args.data_dir, args.satellite, args.threads)
+        if a is None:
+            print("no application rows after the harmonized period")
+        else:
+            print(
+                f"{args.satellite}: applied {a['period'][0]} to {a['period'][1]} "
+                f"(standard processing until {a['standard_until']}), "
+                f"{a['rows_written']:,} rows, {a['estimate']:,.0f} expected fire cell-days"
+            )
+        return
     r = run(args.region, args.data_dir, args.satellite, args.threads, args.retrain)
 
     print(
@@ -488,10 +633,11 @@ def main(argv: list[str] | None = None) -> None:
             f"{area:<17}{s['modis_fire_days']:>11,}{s['estimate']:>12,.0f}{s['bias']:>+9.1%}"
             f"{s['monthly_wape']:>12.1%}{s['naive_bias']:>+9.0%}{band_txt:>18}"
         )
-    by_year = list(r["scores_out_of_fold"]["Brazil"]["by_year"])
+    total = r["total"]
+    by_year = list(r["scores_out_of_fold"][total]["by_year"])
     if r["after_reference"]:
-        by_year += r["after_reference"]["Brazil"]["by_year"]
-    print("Brazil by year: MODIS / estimate / estimate vs MODIS / naive VIIRS")
+        by_year += r["after_reference"][total]["by_year"]
+    print(f"{total} by year: MODIS / estimate / estimate vs MODIS / naive VIIRS")
     for y in by_year:
         mark = "" if y["year"] <= r["reference_last_year"] else "  (MODIS orbits drifting)"
         diff = y["estimate"] / y["modis"] - 1 if y["modis"] else float("nan")

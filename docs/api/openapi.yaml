@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: Space Monkeys API
-  version: 0.6.0
+  version: 0.6.2
   summary: Burning activity calendar from harmonized MODIS and VIIRS fire hotspots, plus a real-time fire pulse.
   description: |
     Contract between the Space Monkeys backend and frontend. It lists everything the
@@ -72,7 +72,11 @@ info:
     unreliable (an open decision). The model learns only from MODIS up to 2021,
     before the orbits of Terra and Aqua started to drift. VIIRS satellite used:
     S-NPP until it ended (2026-11-02), then NOAA-20; NOAA-20 also on the days
-    S-NPP was not observing (listed in `known_gaps`). Every
+    S-NPP was not observing (listed in `known_gaps`); NOAA-21, bridged through
+    NOAA-20, on days neither of them was observing. The estimate runs to the
+    last VIIRS day (`estimate_until`) and needs no MODIS data: after VIIRS
+    standard processing it is computed from NRT detections and its periods are
+    `provisional`. Every
     example in this file is a real value computed from the NASA FIRMS archive for
     the Pantanal biome (IBGE 2019), not invented data.
 

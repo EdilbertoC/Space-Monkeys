@@ -6,6 +6,8 @@ The goal is to harmonize records from different sensors (MODIS, VIIRS, GOES ABI)
 
 This repository holds the API, the real-time worker and the multi-sensor fusion. The frontend lives in [Space-Monkeys-Front](https://github.com/ryangustav/Space-Monkeys-Front).
 
+**How the harmonization works and why: [docs/methodology.md](docs/methodology.md).**
+
 ## What runs today
 
 | Part | What it does |
@@ -220,12 +222,14 @@ pipeline/            historical batch pipeline (needs the [science] extra)
   crossbiome.py      does the calibration hold outside the area it learned from? scored per biome
   unet.py            U-Net calibration (step 7), scored against LightGBM on the same rows
   harmonize.py       harmonized record: cross-fitted VIIRS -> MODIS-equivalent estimate, per biome
+  bridge.py          a new satellite onto the record through the one before it (NOAA-21 via NOAA-20)
   figures.py         validation figures (docs/figures/)
   serving.py         the table /history reads: observed MODIS/VIIRS and VIIRS estimate per cell-day
+docs/methodology.md    the harmonization method, its validation and its limits
 docs/api/openapi.yaml  API contract with the frontend
 models/             trained forecast model (ONNX, climatology, mask, model card)
 notebooks/          Colab notebooks (fire forecast model)
-scripts/            one-off data scripts (persistence table)
+scripts/            one-off data scripts (persistence table, FIRMS country archive download)
 tests/
 ```
 
@@ -367,11 +371,16 @@ What this shows:
 python -m pipeline.training brazil --satellite N20     # national NOAA-20 table, ~8 min
 python -m pipeline.harmonize brazil --satellite SNPP   # resumes saved folds
 python -m pipeline.harmonize brazil --satellite N20
+# the days after the training table (NRT now, everything after MODIS ends), per satellite:
+python -m pipeline.training brazil --satellite SNPP --application   # VIIRS only, no MODIS
+python -m pipeline.harmonize brazil --satellite SNPP --apply-only   # saved model, no refit
 python -m pipeline.figures brazil                      # docs/figures/*.png
 python -m pipeline.serving brazil                      # the table /history reads, ~20 s
 ```
 
 **What the harmonized series is.** MODIS observed while MODIS delivers data. When MODIS ends (or earlier, at a switch date the team may set, see below), it becomes the MODIS-equivalent estimate from VIIRS: S-NPP until it ended (2026-11-02), then NOAA-20. The estimate is computed for every day since 2012 anyway, to check the hand-over.
+
+**The estimate does not need MODIS.** The training table stops on the last day with standard processing for both MODIS and the satellite. The days after it come from an application table with the same rows and features, built from VIIRS alone, and get the final model with the reference calibration and gap. On days both tables cover they are identical (checked on real data: 1,689,111 S-NPP rows of August–September 2024 and 321,965 NOAA-20 rows of July 2026, no difference). Today this carries the estimate from 2026-07-31 (end of VIIRS standard processing) to 2026-11-14 on NRT detections, flagged provisional; after MODIS ends, it is the only way the record continues.
 
 **The reference is MODIS with stable orbits (up to 2021).** Terra and Aqua are drifting. Median local solar time of their daytime detections over Brazil, from the FIRMS archive:
 
@@ -385,7 +394,7 @@ From 2022 MODIS looks at the fires at other hours than before, so it is no longe
 
 **How the VIIRS estimate is built** (`pipeline/harmonize.py`):
 
-1. **Cross-fitting by year blocks over the reference years** (S-NPP: 2012–14, 2015–17, 2018–19, 2020–21; NOAA-20: 2018–19, 2020–21). Each block is predicted by a LightGBM trained on the other blocks only. The years after 2021 are predicted by one final model trained on every reference year: a forward prediction, as it will be after MODIS ends. NOAA-21 (2023) never overlapped the reference MODIS and is not calibrated.
+1. **Cross-fitting by year blocks over the reference years** (S-NPP: 2012–14, 2015–17, 2018–19, 2020–21; NOAA-20: 2018–19, 2020–21). Each block is predicted by a LightGBM trained on the other blocks only. The years after 2021 are predicted by one final model trained on every reference year: a forward prediction, as it will be after MODIS ends. NOAA-21 (2023) never overlapped the reference MODIS; it is bridged through NOAA-20 (see "Bridging the next satellite" below).
 2. **Calibration per biome** (isotonic, on the reference out-of-fold probabilities).
 3. **Coverage gap**: per biome and calendar month, g = all MODIS fire-days / MODIS fire-days inside the rows (reference years); each probability is multiplied by g. An area's estimate is Σ p × g, an expected count of MODIS fire cell-days (not an integer). In the wet season g is large (up to 5 in the Cerrado in March): there most of the estimate is the gap, not what VIIRS saw.
 4. **90% interval** per biome from the 5th/95th percentiles of the relative error of reference monthly totals. It is calibrated at the biome-month scale: it is not valid for yearly totals (errors partly cancel across months) nor for small areas (larger). Scale-aware intervals are left for the analytics step.
@@ -421,9 +430,88 @@ What this shows and what is still open:
 - **The 2012 step is gone.** The naive record (MODIS, then VIIRS) more than doubles in 2012; the MODIS-equivalent estimate follows MODIS year by year through 2021. Pantanal 2020, from models that never saw 2020: the S-NPP estimate is within ±25% of MODIS every month (+11% to +13% at the August–September peak) and NOAA-20 tracks it closely, while S-NPP as seen is 29% to 112% above MODIS depending on the month.
 - **After 2021 observed MODIS rises above the estimate**, more each year (−8% in 2023–2024, −15% in 2025), as its orbits drift. This is a forward prediction from a model that only knows stable-orbit MODIS, so the difference mixes the model's forward error with the change in MODIS. We have not measured how much is each. The timing matches the drift; Aqua moving towards the afternoon peak of fire activity would raise its counts.
 - **The two VIIRS satellites disagree in 2025**: −15.1% from S-NPP, −8.9% from NOAA-20 alone. S-NPP has no gap day in 2025, so this is not explained yet. S-NPP ended in 2026; NOAA-20 has only 2018–2021 as reference, so its model is the noisier of the two.
-- **The switch date is an open decision.** `python -m pipeline.serving brazil --switch-date 2022-01-01` serves the VIIRS estimate from 2022, which removes the drift from recent trends. Two things are missing before that: the estimate stops on the last day with standard-processing data (2026-07-31), so the months after it would be empty; and after MODIS ends the training table cannot be built at all, because it needs MODIS dates. The final model exists; running it on VIIRS-only days is the next step.
+- **The NRT months behave like standard ones.** Estimate against observed MODIS, Brazil cells, August to November 2026 (VIIRS NRT, provisional) and the same months of 2025 (standard processing): −1.3% / −7.2%, −5.2% / −6.6%, −25.6% / −16.7%, −29.8% / −34.0%. S-NPP and NOAA-20 agree in the new months (September 2026: 17,902 and 17,987 expected fire cell-days). The large gaps from October to December, in both years, are the drift pattern above seen month by month.
+- **The switch date is an open decision.** `python -m pipeline.serving brazil --switch-date 2022-01-01` serves the VIIRS estimate from 2022, which removes the drift from recent trends. The estimate now runs to the last VIIRS day without MODIS, so a switch leaves no empty months; what remains is the decision itself.
 - **Areas that cross the border.** The estimate exists only in cells of a Brazilian biome. A box over Bolivia or Paraguay would lose that part after a switch.
 - Per-cell values remain much less certain than area totals; the gap of small fires is spread over cells where VIIRS saw activity.
+
+### Bridging the next satellite (NOAA-21)
+
+```bash
+python -m pipeline.bridge brazil --new N21 --reference N20   # needs NOAA-20's harmonized record
+python -m pipeline.serving brazil
+```
+
+NOAA-21 (2023) never flew with stable-orbit MODIS, so it cannot be calibrated the way S-NPP and NOAA-20 were. It flew with NOAA-20, so it is bridged through it (`pipeline/bridge.py`): for each cell-day NOAA-21 can see, the model learns the value NOAA-20's harmonized record gives that cell-day, already in MODIS-equivalent fire cell-days. Same recipe as the direct harmonization: the same rows and features, from NOAA-21 alone; LightGBM regression cross-fitted by single overlap years (2023–2026); isotonic calibration per biome; a coverage gap per biome and month for the NOAA-20 record mass outside NOAA-21's rows. Days either satellite was not observing are left out.
+
+Nothing in it is specific to these two satellites: `--new` and `--reference` take any pair, and a bridged satellite can be the reference of the next one. This is how the record can continue from 2000 through any number of satellite changes, one link at a time. The assumption is that the new satellite says nothing about MODIS that the reference does not, and every link adds its own error, so each link is scored.
+
+Out-of-fold scores against the NOAA-20 record, overlap 2023-03 to 2026-07 (each year predicted by a model that never saw it):
+
+| Area | Monthly WAPE | Bias |
+|---|---|---|
+| Brazil | 2.6% | −0.1% |
+| Amazon | 2.8% | +0.0% |
+| Cerrado | 4.8% | −0.6% |
+| Caatinga | 6.7% | +0.8% |
+| Atlantic Forest | 7.1% | +0.6% |
+| Pantanal | 9.2% | +0.2% |
+| Pampa | 16.1% | −0.3% |
+
+Brazil, NOAA-20 record / NOAA-21 through the bridge / observed MODIS: 152,185 / 149,489 / 158,939 (2023, from March), 187,918 / 190,981 / 195,038 (2024), 106,304 / 105,879 / 116,740 (2025). NOAA-21 lands where NOAA-20 does, so it inherits NOAA-20's distance to drifting MODIS and adds little of its own.
+
+**Does a chain lose accuracy? A control on a known link.** NOAA-20 has a direct harmonization against MODIS, so it can also be bridged through S-NPP and the two compared (`python -m pipeline.bridge brazil --new N20 --reference SNPP`). Monthly WAPE against observed MODIS, Brazil, the 45 months of 2018-04 to 2021 (stable MODIS orbits, every value out of fold):
+
+| Route to MODIS-equivalent | Monthly WAPE | Bias |
+|---|---|---|
+| NOAA-20 → S-NPP record (the chain) | 4.1% | −0.0% |
+| NOAA-20 → MODIS (direct) | 6.3% | +0.1% |
+| S-NPP record itself, same months | 4.3% | — |
+
+The extra link adds almost no error: the chain is as good as its first link, and better than the direct model, because S-NPP has ten reference years against NOAA-20's four. The link itself scores 2.8% against the S-NPP record (NOAA-21 → NOAA-20: 2.6%).
+
+In serving, NOAA-21 covers the days neither S-NPP nor NOAA-20 was observing. There is no such day yet (no NOAA-20 outage overlaps an S-NPP outage after March 2023), so the served values do not change today; NOAA-21 takes over when NOAA-20 fails or ends.
+
+### A second country: Australia
+
+```bash
+python scripts/download_firms_country.py Australia australia   # FIRMS yearly country archive, ~2.7 GB
+# Natural Earth admin-1 (1:50m) in data/raw/naturalearth/ne_50m_admin_1_states_provinces.zip
+python -m pipeline.ingest australia
+python -m pipeline.cube australia
+python -m pipeline.biomes australia --country Australia     # states and territories as regions
+python -m pipeline.training australia --satellite SNPP
+python -m pipeline.training australia --satellite N20
+python -m pipeline.harmonize australia --satellite SNPP
+python -m pipeline.harmonize australia --satellite N20
+```
+
+The same code, with two inputs changed: the detections come from the FIRMS yearly country archive (standard processing, MODIS 2000–2025, S-NPP 2012–2025, NOAA-20 2018–2025; it has no NOAA-21), and the calibration regions are the states and territories of Natural Earth in place of the IBGE biomes. `pipeline.ingest` takes the VIIRS satellite from the product code, because the country archive writes `N` where the area download writes `SNPP`. Fire regimes differ a lot from Brazil's: most fire cell-days are tropical savanna in the Northern Territory, Western Australia and Queensland.
+
+Out-of-fold scores on the reference years, against observed MODIS:
+
+| Area | MODIS fire cell-days, S-NPP years | Monthly WAPE, S-NPP | Monthly WAPE, NOAA-20 | Naive VIIRS (bias) |
+|---|---|---|---|---|
+| Australia | 705,459 | 2.6% | 7.4% | +87% |
+| Northern Territory | 228,653 | 3.0% | 7.1% | +70% |
+| Western Australia | 201,012 | 3.5% | 8.3% | +64% |
+| Queensland | 167,814 | 3.6% | 7.1% | +108% |
+| New South Wales | 68,480 | 7.1% | 10.4% | +144% |
+| Victoria | 22,401 | 10.9% | 13.2% | +108% |
+| South Australia | 12,788 | 8.2% | 15.2% | +83% |
+| Tasmania | 4,311 | 12.9% | 15.1% | +196% |
+
+Australia, S-NPP estimate against observed MODIS, fire cell-days per year:
+
+| | 2012 | 2013–2021 | 2022 | 2023 | 2024 | 2025 |
+|---|---|---|---|---|---|---|
+| Estimate vs MODIS | −2.7% | −1.0% to +7.0% | +3.6% | +1.2% | −5.2% | +2.1% |
+
+What this shows:
+
+- **The method carries to another continent unchanged.** S-NPP lands closer to MODIS in Australia (2.6% monthly WAPE) than in Brazil (3.7%). The 2012 step is gone there too: MODIS 110,425 fire cell-days in 2012, S-NPP as seen 182,406, the estimate 107,438. 2020 is the worst reference year (+7.0%).
+- **The same pattern by region.** Error is low where large savanna fires dominate (Northern Territory, Western Australia, Queensland: 3.0–3.6%) and grows where fires are small and few (Victoria, Tasmania: 11–13%), as in the Pampa.
+- **No drift gap after 2021 in Australia.** Observed MODIS and the estimate stay within ±5% from 2022 to 2025, while in Brazil MODIS rises 8–15% above it. The orbits drifted the same way, so the effect of the drift on fire counts depends on the region. One possible reason is a different daily cycle of fire activity; it has not been tested.
 
 `data/` is not committed.
 
@@ -450,6 +538,11 @@ Historical record (pipeline), from the FIRMS archive download (https://firms.mod
 - Attribute fields (including `type`: 0 vegetation fire, 1 volcano, 2 other static land source, 3 offshore): https://www.earthdata.nasa.gov/data/tools/firms/active-fire-data-attributes-modis-viirs
 - Pilot area: box west −60, south −22.5, east −54.5, north −15 (Pantanal), 2000-11-01 to 2026-11-14.
 - National area: box west −74.5, south −34.5, east −28.5, north 6 (Brazil and surroundings), same dates (requests 848644–848647).
+- Second country, Australia: the FIRMS yearly country archive, standard processing, `https://firms.modaps.eosdis.nasa.gov/data/country/{modis|viirs-snpp|viirs-jpss1}/{year}/{sensor}_{year}_Australia.csv` (MODIS C6.1 2000–2025, VIIRS S-NPP 2012–2025, VIIRS NOAA-20 2018–2025; NOAA-21 was not found in this archive), downloaded with `scripts/download_firms_country.py`.
+
+### Natural Earth admin-1 (calibration regions outside Brazil)
+
+- **Natural Earth 1:50m Cultural Vectors, Admin 1 – States, Provinces** (`ne_50m_admin_1_states_provinces.zip`, 0.9 MB), Natural Earth, public domain: https://www.naturalearthdata.com/downloads/50m-cultural-vectors/ (file from https://naciscdn.org/naturalearth/50m/cultural/). Used to label every 0.1° cell of Australia with its state or territory, the calibration region there in place of a biome (the Australian Capital Territory and Jervis Bay Territory are merged into New South Wales).
 
 ### IBGE biomes
 
