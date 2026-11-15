@@ -678,7 +678,7 @@ components:
     series:
       name: series
       in: query
-      description: Which series to compute on. Defaults to harmonized; until harmonization is available, the server answers `harmonized` requests with 409 and the client should fall back to `modis`. `viirs` is answered with 422 here, because it is not comparable across years.
+      description: Which series to compute on. Defaults to harmonized; until harmonization is available, the server answers `harmonized` requests with 409 and the client should fall back to `modis`. `viirs` is answered with 422 here, because it is not comparable across years. `viirs_only` and `detected` (the VIIRS layers, from the first complete year of the layer) are answered with 409 when the serving table has no layer.
       schema: { $ref: "#/components/schemas/Series" }
     base_start_year:
       name: base_start_year
@@ -744,7 +744,15 @@ components:
 
     Series:
       type: string
-      enum: [harmonized, modis, viirs]
+      description: |
+        `harmonized`: MODIS-equivalent fire cell-days (MODIS observed, then the VIIRS
+        estimate), the long record since 2000. `modis`, `viirs`: observed counts.
+        `viirs_only`: the VIIRS-only layer, expected fire cell-days the estimating VIIRS
+        satellite saw that MODIS would not have (small fires). `detected`: VIIRS estimate
+        + VIIRS-only layer, the expected cell-days with fire seen by MODIS or that
+        satellite. The layers split VIIRS instead of rescaling it, one satellite at a
+        time, so both are comparable across years from 2012 on.
+      enum: [harmonized, modis, viirs, viirs_only, detected]
       default: harmonized
 
     Interval:
@@ -872,6 +880,18 @@ components:
               type: object
               description: Held-out scores of the model in use (bias, monthly WAPE...), when available.
               additionalProperties: true
+            layers:
+              type: object
+              description: The VIIRS-only layer (series viirs_only and detected) and its check against the observed union of MODIS and the satellite on the reference years.
+              properties:
+                status: { type: string, enum: [available, unavailable] }
+                method: { type: string }
+                satellites: { type: array, items: { type: string, enum: [SNPP, N20] } }
+                start: { type: [string, "null"], format: date }
+                end: { type: [string, "null"], format: date }
+                check:
+                  type: [object, "null"]
+                  additionalProperties: true
         known_gaps:
           type: array
           items:
@@ -912,6 +932,12 @@ components:
             - { type: "null" }
         modis: { type: [integer, "null"], description: Observed MODIS fire cell-days. }
         viirs: { type: [integer, "null"], description: Observed VIIRS fire cell-days (any satellite). }
+        viirs_only:
+          type: [number, "null"]
+          description: VIIRS-only layer (expected fire cell-days only VIIRS sees); null outside the layer.
+        detected:
+          type: [number, "null"]
+          description: VIIRS estimate + VIIRS-only layer (expected cell-days seen by MODIS or the satellite); null outside the layer.
         provisional: { type: boolean }
 
     Calendar:

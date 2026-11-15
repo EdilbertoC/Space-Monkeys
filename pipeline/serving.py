@@ -12,6 +12,16 @@ One row per 0.1° cell and UTC day with any fire signal:
          NULL where there is none. It runs to the last VIIRS day: the days after the
          training table come from the VIIRS-only application table, and those after
          VIIRS standard processing are provisional (meta coverage standard_until)
+- fine:  the VIIRS-only layer, expected fire-days the estimating satellite saw that
+         MODIS would not have: 1 - p on each cell-day the satellite itself saw fire,
+         where p = est / coverage-gap factor is the calibrated P(MODIS also sees it).
+         Only for the directly harmonized satellites (S-NPP, NOAA-20); NULL elsewhere.
+
+The layers split VIIRS instead of rescaling it: est is what both sensors can see
+(continuous with MODIS since 2000) and fine is what only VIIRS sees (from 2012).
+Their sum is the expected number of cell-days with fire seen by MODIS or by the
+satellite; meta harmonization.layers.check compares it with that observed union on
+the reference years, which no model input ever saw as a target.
 
 plus meta.json: coverage per sensor, biomes, harmonization method and switch date,
 model scores and monthly intervals per biome, known data gaps (from the FIRMS Readme
@@ -30,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 from datetime import date
 from pathlib import Path
@@ -81,8 +92,131 @@ METHOD = (
 )
 
 
+LAYERS_METHOD = (
+    "VIIRS split in two layers that add up, not rescaled: the common layer is the "
+    "MODIS-equivalent estimate (fire both sensors can see, continuous since 2000); the "
+    "VIIRS-only layer is 1 - P(MODIS also sees it) on each cell-day the estimating "
+    "satellite saw fire (small fires only VIIRS detects, from 2012). Common + VIIRS-only "
+    "is the expected number of cell-days with fire seen by MODIS or by that satellite."
+)
+# Satellites with a direct VIIRS -> MODIS model (a calibrated probability and gap
+# factors); NOAA-21 is bridged through NOAA-20 as a regression, so it has no p.
+LAYER_SATELLITES = ("SNPP", "N20")
+REFERENCE_LAST_YEAR = 2021  # as pipeline.harmonize: MODIS orbits drift from 2022
+
 SENSOR = {s["name"]: s["sensor"] for s in SATELLITES}
 FULL_NAME = {"SNPP": "S-NPP", "N20": "NOAA-20", "N21": "NOAA-21"}
+
+
+def _on(condition: str, column: str) -> str:
+    """A date condition written on `date`, applied to another column expression."""
+    return re.sub(r"\bdate\b", column, condition)
+
+
+def gap_table_sql(gap_factors: dict) -> str:
+    """The coverage-gap factors of a harmonization report as an SQL table."""
+    rows = [
+        f"('{str(b).replace(chr(39), chr(39) * 2)}', {int(m)}, {float(f)})"
+        for b, months in gap_factors.items()
+        for m, f in months.items()
+    ]
+    if not rows:
+        return "SELECT CAST(NULL AS VARCHAR) AS biome, 0 AS month, 1.0 AS g WHERE false"
+    return f"SELECT * FROM (VALUES {', '.join(rows)}) AS t(biome, month, g)"
+
+
+def fine_sql(sat: str, record_src: str, gap_factors: dict, days: str) -> str:
+    """VIIRS-only expected fire-days per cell-day for one satellite: 1 - p on the
+    cell-days it saw fire in a biome cell, p = equiv / g (0 where the record has no
+    row: its estimate was below the write floor). `days` filters the dates."""
+    return f"""
+        SELECT c.cell_id, c.date,
+               greatest(0.0, 1.0 - least(1.0, coalesce(e.equiv, 0) / coalesce(g.g, 1.0))) AS fine
+        FROM (SELECT DISTINCT cell_id, CAST(date AS DATE) AS date
+              FROM cube_rows WHERE satellite = '{sat}') c
+        JOIN biome_t b ON b.cell_id = c.cell_id
+        LEFT JOIN (SELECT cell_id, CAST(date AS DATE) AS date, equiv FROM {record_src}) e
+               ON e.cell_id = c.cell_id AND e.date = c.date
+        LEFT JOIN ({gap_table_sql(gap_factors)}) g
+               ON g.biome = b.biome AND g.month = month(c.date)
+        WHERE b.biome IS NOT NULL AND {_on(days, "c.date")}
+    """
+
+
+def layers_check(
+    con: duckdb.DuckDBPyConnection,
+    sat: str,
+    record_src: str,
+    gap_factors: dict,
+    start: date,
+    excluded: list[date],
+) -> dict | None:
+    """Common + VIIRS-only layer against the observed union (MODIS or the satellite
+    saw fire), biome cells, standard processing, from `start` to the end of the
+    reference years, without the days a satellite was not observing. Monthly totals:
+    bias and WAPE for the whole region and per biome."""
+    end = date(REFERENCE_LAST_YEAR, 12, 31)
+    if start > end:
+        return None
+    days = f"date BETWEEN DATE '{start}' AND DATE '{end}' AND date NOT IN ({sql_dates(excluded)})"
+    rows = con.execute(f"""
+        WITH obs AS (
+            SELECT c.cell_id, CAST(c.date AS DATE) AS date, b.biome
+            FROM cube_rows c JOIN biome_t b ON b.cell_id = c.cell_id
+            WHERE b.biome IS NOT NULL AND NOT c.nrt
+              AND (c.sensor = 'MODIS' OR c.satellite = '{sat}')
+              AND {_on(days, "CAST(c.date AS DATE)")}
+            GROUP BY ALL
+        ),
+        est AS (
+            SELECT CAST(e.date AS DATE) AS date, b.biome, e.equiv AS v
+            FROM {record_src} e JOIN biome_t b ON b.cell_id = e.cell_id
+            WHERE b.biome IS NOT NULL AND {_on(days, "CAST(e.date AS DATE)")}
+        ),
+        fine AS (
+            SELECT f.date, b.biome, f.fine AS v
+            FROM ({fine_sql(sat, record_src, gap_factors, days)}) f
+            JOIN biome_t b ON b.cell_id = f.cell_id
+        ),
+        expected AS (SELECT * FROM est UNION ALL SELECT * FROM fine)
+        SELECT coalesce(o.biome, x.biome) AS biome, coalesce(o.y, x.y) AS year,
+               coalesce(o.m, x.m) AS month, coalesce(o.n, 0) AS observed,
+               coalesce(x.v, 0) AS expected
+        FROM (SELECT biome, year(date) AS y, month(date) AS m, count(*) AS n
+              FROM obs GROUP BY ALL) o
+        FULL OUTER JOIN (SELECT biome, year(date) AS y, month(date) AS m, sum(v) AS v
+                         FROM expected GROUP BY ALL) x
+          ON o.biome = x.biome AND o.y = x.y AND o.m = x.m
+    """).fetchall()
+    if not rows:
+        return None
+
+    def score(items: list[tuple]) -> dict:
+        months: dict[tuple, list[float]] = {}
+        for _, y, m, o, x in items:
+            acc = months.setdefault((y, m), [0.0, 0.0])
+            acc[0] += o
+            acc[1] += x
+        obs = sum(a[0] for a in months.values())
+        exp = sum(a[1] for a in months.values())
+        err = sum(abs(a[1] - a[0]) for a in months.values())
+        return {
+            "observed_union": int(obs),
+            "expected": round(exp, 2),
+            "bias": round(exp / obs - 1, 4) if obs else None,
+            "monthly_wape": round(err / obs, 4) if obs else None,
+        }
+
+    by_biome: dict[str, list[tuple]] = {}
+    for r in rows:
+        by_biome.setdefault(r[0], []).append(r)
+    return {
+        "satellite": sat,
+        "period": [str(start), str(end)],
+        "target": f"cell-days with fire seen by MODIS or {FULL_NAME.get(sat, sat)}",
+        "total": score(rows),
+        "biomes": {b: score(items) for b, items in sorted(by_biome.items())},
+    }
 
 
 def detected_gaps(gaps: dict[str, list[date]], estimate_from: set[str]) -> list[dict]:
@@ -138,12 +272,22 @@ def build_serving(
         FROM read_parquet('{cube.as_posix()}/**/*.parquet', hive_partitioning = true)
         GROUP BY cell_id, date
     """)
+    con.execute(
+        "CREATE TEMP VIEW cube_rows AS SELECT * FROM "
+        f"read_parquet('{cube.as_posix()}/**/*.parquet', hive_partitioning = true)"
+    )
+    con.execute(
+        "CREATE TEMP VIEW biome_t AS SELECT cell_id, biome FROM "
+        f"read_parquet('{biome_file.as_posix()}')"
+    )
 
     # VIIRS estimate: S-NPP first; NOAA-20 after the last S-NPP estimate and on the
     # days S-NPP was not observing (an outage would read as "no fire"); NOAA-21 on the
     # days neither covers.
     gaps = observation_gaps(region, data_dir)
     est_parts, est_sats, viirs_sources, est_last = [], [], [], None
+    fine_parts, layer_sats, check = [], set(), None
+    modis_gaps = sorted(set(gaps.get("Terra", [])) | set(gaps.get("Aqua", [])))
     covered: list[str] = []  # SQL: the day already has an estimate from an earlier satellite
     for sat in ("SNPP", "N20", "N21"):
         try:
@@ -161,6 +305,21 @@ def build_serving(
             f"SELECT cell_id, CAST(date AS DATE) AS date, equiv FROM {src} "
             f"WHERE equiv > 0 AND {observing} AND {free}"
         )
+        report = harmonized / f"{sat}_model.json"
+        if sat in LAYER_SATELLITES and d == harmonized / sat and report.exists():
+            gap_factors = json.loads(report.read_text(encoding="utf-8")).get("gap_factors", {})
+            days = f"date BETWEEN DATE '{first}' AND DATE '{last}' AND {observing} AND {free}"
+            fine_parts.append(fine_sql(sat, src, gap_factors, days))
+            layer_sats.add(sat)
+            if check is None:
+                check = layers_check(
+                    con,
+                    sat,
+                    src,
+                    gap_factors,
+                    first,
+                    sorted(set(gaps.get(sat, [])) | set(modis_gaps)),
+                )
         covered.append(
             f"CAST(date AS DATE) BETWEEN DATE '{first}' AND DATE '{last}' AND {observing}"
         )
@@ -174,6 +333,18 @@ def build_serving(
         else "SELECT CAST(NULL AS BIGINT) AS cell_id, CAST(NULL AS DATE) AS date, "
         "CAST(NULL AS FLOAT) AS equiv WHERE false"
     )
+    fine_all = (
+        " UNION ALL ".join(fine_parts)
+        if fine_parts
+        else "SELECT CAST(NULL AS BIGINT) AS cell_id, CAST(NULL AS DATE) AS date, "
+        "CAST(NULL AS FLOAT) AS fine WHERE false"
+    )
+    # The layer exists while the estimate comes from a satellite that has one.
+    layer_span = None
+    for s in viirs_sources:
+        if s["name"] not in layer_sats:
+            break
+        layer_span = (layer_span[0] if layer_span else s["start"], s["end"])
 
     if out.exists():
         shutil.rmtree(out)
@@ -185,8 +356,11 @@ def build_serving(
                    coalesce(o.modis, 0) AS modis,
                    coalesce(o.viirs, 0) AS viirs,
                    CAST(e.equiv AS FLOAT) AS est,
+                   CAST(f.fine AS FLOAT) AS fine,
                    year(coalesce(o.date, e.date)) AS year
             FROM obs o FULL OUTER JOIN ({est_sql}) e USING (cell_id, date)
+            LEFT JOIN ({fine_all}) f
+              ON f.cell_id = coalesce(o.cell_id, e.cell_id) AND f.date = coalesce(o.date, e.date)
             ORDER BY year, cell_id, date
         ) TO '{(out / "cell_day").as_posix()}'
           (FORMAT parquet, PARTITION_BY (year), COMPRESSION zstd, ROW_GROUP_SIZE 100000)
@@ -238,6 +412,14 @@ def build_serving(
             "version": str(date.today()),
             "test_metrics": scores,
             "interval_90_monthly_by_biome": intervals,
+            "layers": {
+                "status": "available" if layer_span else "unavailable",
+                "method": LAYERS_METHOD,
+                "satellites": sorted(layer_sats),
+                "start": layer_span[0] if layer_span else None,
+                "end": layer_span[1] if layer_span else None,
+                "check": check,
+            },
         },
         "known_gaps": KNOWN_GAPS + detected_gaps(gaps, estimate_from=set(est_sats)),
         "limits": LIMITS,

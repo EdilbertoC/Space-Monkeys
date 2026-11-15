@@ -75,13 +75,13 @@ For language models and AI agents, [`llms.txt`](llms.txt) explains every route, 
 
 **Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
 
-Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`. The routes that compare years (climatology, anomaly, season, trend) answer `series=viirs` with 422: it counts fire seen by any VIIRS satellite, so it steps up when NOAA-20 (2018, about +50% fire cell-days over S-NPP alone) and NOAA-21 (2023, about +80%) join.
+Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`, and the VIIRS layers `viirs_only` and `detected` (see [The VIIRS-only layer](#the-viirs-only-layer-harmonizing-without-losing-what-viirs-sees)). The routes that compare years (climatology, anomaly, season, trend) answer `series=viirs` with 422: it counts fire seen by any VIIRS satellite, so it steps up when NOAA-20 (2018, about +50% fire cell-days over S-NPP alone) and NOAA-21 (2023, about +80%) join.
 
 | Method | Path | Returns |
 | --- | --- | --- |
 | GET | `/history/meta` | Coverage per sensor, biomes, harmonization method and status, model scores, known data gaps, limits |
 | POST | `/history/areas` | `{"geometry": <GeoJSON Polygon/MultiPolygon>}` → `area_id`, cells, bbox, biome shares |
-| GET | `/history/calendar?start&end&granularity=day\|week\|month` | Fire cell-days per bucket: harmonized (with interval and source), MODIS, VIIRS, provisional flag |
+| GET | `/history/calendar?start&end&granularity=day\|week\|month` | Fire cell-days per bucket: harmonized (with interval and source), MODIS, VIIRS, the VIIRS-only layer and detected, provisional flag |
 | GET | `/history/climatology?series&granularity=week\|month` | Normal year over complete base years (default 2003 to last complete year): median, 10th/90th percentiles, mean |
 | GET | `/history/anomaly?start&end&series` | The period against the same calendar dates in every other base year: percentile, class below/normal/above/record |
 | GET | `/history/season?year&series` | Season start (10%), peak and end (90%) weeks, against the normal season |
@@ -435,6 +435,18 @@ What this shows and what is still open:
 - **The switch date is an open decision.** `python -m pipeline.serving brazil --switch-date 2022-01-01` serves the VIIRS estimate from 2022, which removes the drift from recent trends. The estimate now runs to the last VIIRS day without MODIS, so a switch leaves no empty months; what remains is the decision itself.
 - **Areas that cross the border.** The estimate exists only in cells of a Brazilian biome. A box over Bolivia or Paraguay would lose that part after a switch.
 - Per-cell values remain much less certain than area totals; the gap of small fires is spread over cells where VIIRS saw activity.
+
+### The VIIRS-only layer: harmonizing without losing what VIIRS sees
+
+The MODIS-equivalent record drops the small fires only VIIRS detects. `pipeline.serving` therefore also splits each VIIRS fire cell-day into the part MODIS would also have seen (p, the calibrated probability from the model above) and the part only VIIRS sees (1 − p). Nothing is rescaled: the two layers add back to the observation.
+
+| Series | What it counts | From |
+|---|---|---|
+| `harmonized` | MODIS-equivalent (both sensors can see it) | 2000 |
+| `viirs_only` | Σ (1 − p): small fires only VIIRS detects | 2012 |
+| `detected` | harmonized estimate + `viirs_only`: cell-days with fire seen by MODIS or the satellite | 2012 |
+
+Both new series count one satellite at a time (S-NPP, then NOAA-20), so they are comparable across years. `detected` is the expected size of the union of the two sensors' detections, so it is scored against the observed union (MODIS or S-NPP saw fire) on the reference years; the score is in `GET /history/meta` → `harmonization.layers.check`. It needs no retraining: `python -m pipeline.serving brazil` computes it from the saved estimate and gap factors. Details in [docs/methodology.md](docs/methodology.md#keeping-what-only-viirs-sees-the-viirs-only-layer).
 
 ### Bridging the next satellite (NOAA-21)
 

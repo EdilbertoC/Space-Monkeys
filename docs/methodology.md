@@ -171,6 +171,24 @@ What we learned:
 | Pantanal | 9.8% | 8.5% | +79% | −15% / +42% |
 | Pampa | 14.1% | 15.3% | +236% | −29% / +49% |
 
+### Keeping what only VIIRS sees: the VIIRS-only layer
+
+Expressing VIIRS in MODIS units makes the record continuous, but it drops the small fires that only VIIRS detects. That is the right choice for a 26-year trend and the wrong one for knowing how much fire is detectable now. So the record is not only rescaled; VIIRS is also split in two layers that add up (`pipeline/serving.py`).
+
+For each cell-day the estimating satellite saw fire, the model already gives p, the calibrated probability that MODIS would also have detected it (step 2, before the coverage gap, recovered as p = estimate / g). That one detection is divided between the two sensors:
+
+```
+VIIRS fire cell-day  =  p (MODIS would see it too)  +  (1 − p) (only VIIRS sees it)
+```
+
+- **Common layer** (`series=harmonized`): Σ p × g. Fire both sensors can see, continuous with MODIS since 2000. This is the harmonized record above.
+- **VIIRS-only layer** (`series=viirs_only`): Σ (1 − p) over the cell-days the satellite saw fire. Small fires below MODIS's detection limit, from 2012. Before 2012 it is missing, not zero: no sensor looked for them.
+- **Detected** (`series=detected`): common + VIIRS-only, the expected number of cell-days with fire seen by MODIS or by the satellite.
+
+Nothing is pulled down or up: the layers add back to what was observed. The algebra makes `detected` the expected size of the union of the two sensors' detections (the satellite's own fire cell-days plus the MODIS fire it missed), so it can be checked against data no model ever used as a target: the cell-days where MODIS or the satellite saw fire, on the reference years. That score is written to `GET /history/meta` (`harmonization.layers.check`) every time the serving table is built.
+
+Two choices keep the layer comparable across years. It counts one satellite at a time (S-NPP, then NOAA-20 when S-NPP was not observing or had ended), as the estimate does, so it does not grow when NOAA-20 (2018) and NOAA-21 (2023) add passes. And it exists only for the satellites with a direct VIIRS-to-MODIS model (S-NPP, NOAA-20): NOAA-21's bridge is a regression to an expected count, with no p to split.
+
 ## 9. Validation
 
 **Pantanal 2020** is the validation season chosen by the team. It is scored by models that never saw 2020: its block (2020–21) is predicted by models trained on the other blocks. The S-NPP estimate is within ±25% of MODIS every month, and +11% to +13% at the August–September peak. NOAA-20 tracks it closely. S-NPP as seen, without harmonization, is 29% to 112% above MODIS depending on the month.
@@ -242,6 +260,8 @@ Percentiles are used rather than z-scores because they make no assumption about 
 - **Hotspots are not burned area.** The record measures how often fire was detected in a cell, not how much land burned.
 
 ## 12. Open decisions
+
+- **Which layer to show by default.** `harmonized` answers "is this decade different from the last?"; `detected` answers "how much fire is detectable now?". The calendar returns both; which one a screen leads with is a product decision.
 
 - **When the harmonized series switches from MODIS to the VIIRS estimate.** Today the switch happens only when MODIS stops delivering data. Switching on 2022-01-01 (`python -m pipeline.serving brazil --switch-date 2022-01-01`) would remove the orbit drift from recent normals and trends. The estimate now reaches the last VIIRS day without MODIS (Section 8, step 5), so a switch leaves no empty months. What remains is the decision itself.
 - **How long a chain can get.** NOAA-21 is bridged through NOAA-20 (Section 8, step 6) and serves the days neither S-NPP nor NOAA-20 was observing; there is none yet, so it changes no served value today. Each further link adds error. When the record should be re-anchored on a newer reference instead of chained further is not decided.

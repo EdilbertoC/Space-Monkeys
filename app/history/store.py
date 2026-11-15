@@ -139,6 +139,8 @@ class HistoryStore:
             "CREATE VIEW cell_day AS SELECT * FROM "
             f"read_parquet('{cell_day}/**/*.parquet', hive_partitioning = true)"
         )
+        columns = {r[0] for r in self.con.execute("DESCRIBE cell_day").fetchall()}
+        self._fine = "coalesce(sum(fine), 0)" if "fine" in columns else "0.0"  # older tables
         biome_file = (self.data_dir / "cell_biome.parquet").as_posix()
         self.con.execute(
             f"CREATE TABLE cell_biome AS SELECT cell_id, biome FROM read_parquet('{biome_file}')"
@@ -154,10 +156,15 @@ class HistoryStore:
         est = None
         if h.get("viirs_satellites"):
             est = (d(h["viirs_satellites"][0]["start"]), d(h["estimate_until"]))
+        lay = h.get("layers") or {}
+        layers = None
+        if lay.get("status") == "available" and lay.get("start") and lay.get("end"):
+            layers = (d(lay["start"]), d(lay["end"]))
         return Coverage(
             modis=(d(c["modis"]["start"]), d(c["modis"]["end"])),
             viirs=(d(c["viirs"]["start"]), d(c["viirs"]["end"])),
             estimate=est,
+            layers=layers,
             switch_date=d(h["switch_date"]) if h.get("switch_date") else None,
             standard_until=min(d(c["modis"]["standard_until"]), d(c["viirs"]["standard_until"])),
         )
@@ -269,12 +276,14 @@ class HistoryStore:
 
     # ---- data --------------------------------------------------------------------
     def daily(self, area: Area, start: date, end: date) -> pd.DataFrame:
-        """Area sums per day: modis, viirs (observed), est (VIIRS estimate); every day
-        of [start, end] is present (0 when nothing happened)."""
+        """Area sums per day: modis, viirs (observed), est (VIIRS estimate), fine
+        (VIIRS-only layer); every day of [start, end] is present (0 when nothing
+        happened)."""
         rows = (
             self.con.cursor()
             .execute(f"""
-            SELECT date, sum(modis) AS modis, sum(viirs) AS viirs, coalesce(sum(est), 0) AS est
+            SELECT date, sum(modis) AS modis, sum(viirs) AS viirs, coalesce(sum(est), 0) AS est,
+                   {self._fine} AS fine
             FROM cell_day
             WHERE year BETWEEN {start.year} AND {end.year}
               AND date BETWEEN DATE '{start.isoformat()}' AND DATE '{end.isoformat()}'
@@ -286,7 +295,7 @@ class HistoryStore:
         idx = pd.date_range(start, end, freq="D")
         rows["date"] = pd.to_datetime(rows["date"])
         frame = rows.set_index("date").reindex(idx, fill_value=0)
-        return frame.astype({"modis": float, "viirs": float, "est": float})
+        return frame.astype({"modis": float, "viirs": float, "est": float, "fine": float})
 
     def per_cell(self, area: Area, start: date, end: date) -> pd.DataFrame:
         """Per cell with any fire in [start, end]: modis and viirs observed counts and the

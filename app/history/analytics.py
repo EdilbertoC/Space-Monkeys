@@ -10,6 +10,10 @@ Definitions (also in docs/api/openapi.yaml):
 - weeks are days 1-7, 8-14, ... of the year; week 51 runs to 31 December;
 - harmonized = MODIS observed while MODIS has data (and before the switch date),
   otherwise the VIIRS estimate;
+- viirs_only = the VIIRS-only layer: expected fire cell-days the estimating VIIRS
+  satellite saw that MODIS would not have (small fires), where the layer exists;
+- detected = the VIIRS estimate + the VIIRS-only layer: expected cell-days with fire
+  seen by MODIS or that satellite, one satellite at a time (comparable across years);
 - normal = median and 10th/90th percentiles over the base years;
 - season start/end = first week by which 10% / 90% of the year's fire cell-days had
   happened; peak = the week with the most;
@@ -27,7 +31,7 @@ from scipy.stats import theilslopes
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 REF_YEAR = 2021  # non-leap year used for week labels and "normal" month-days
-SERIES = ("harmonized", "modis", "viirs")
+SERIES = ("harmonized", "modis", "viirs", "viirs_only", "detected")
 
 
 class AnalyticsError(ValueError):
@@ -41,6 +45,7 @@ class Coverage:
     estimate: tuple[date, date] | None
     switch_date: date | None
     standard_until: date  # earliest day after which data is provisional (NRT)
+    layers: tuple[date, date] | None = None  # days with the VIIRS-only layer
 
     def harmonized_modis_end(self) -> date:
         end = self.modis[1]
@@ -89,6 +94,14 @@ def series_values(daily: pd.DataFrame, series: str, cov: Coverage) -> pd.DataFra
         out["value"] = daily[series].where(_within(idx, span)).astype(float)
         out["source"] = np.where(_within(idx, span), series, None)
         return out
+    if series in ("viirs_only", "detected"):
+        inside = _within(idx, cov.layers)
+        fine = daily["fine"] if "fine" in daily else pd.Series(0.0, index=idx)
+        value = fine if series == "viirs_only" else daily["est"] + fine
+        out["value"] = value.where(inside).astype(float)
+        out["est_part"] = np.where(inside, daily["est"], 0.0) if series == "detected" else 0.0
+        out["source"] = np.where(inside, "viirs_estimate", None)
+        return out
     use_modis = _within(idx, (cov.modis[0], cov.harmonized_modis_end()))
     use_est = ~use_modis & _within(idx, cov.estimate)
     out["value"] = np.where(use_modis, daily["modis"], np.where(use_est, daily["est"], np.nan))
@@ -131,6 +144,8 @@ def calendar(
     harm = series_values(daily, "harmonized", cov)
     modis = series_values(daily, "modis", cov)["value"]
     viirs = series_values(daily, "viirs", cov)["value"]
+    only = series_values(daily, "viirs_only", cov)["value"]
+    detected = series_values(daily, "detected", cov)["value"]
     out = []
     for b_start, b_end in buckets(start, end, granularity):
         sl = slice(pd.Timestamp(b_start), pd.Timestamp(b_end))
@@ -148,6 +163,7 @@ def calendar(
             sources = set(h["source"].dropna())
             source = sources.pop() if len(sources) == 1 else "mixed"
         m, v = _sum(modis.loc[sl]), _sum(viirs.loc[sl])
+        f, det = _sum(only.loc[sl]), _sum(detected.loc[sl])
         out.append(
             {
                 "start": b_start.isoformat(),
@@ -156,6 +172,8 @@ def calendar(
                 "harmonized_source": source,
                 "modis": None if m is None else int(m),
                 "viirs": None if v is None else int(v),
+                "viirs_only": None if f is None else round(f, 2),
+                "detected": None if det is None else round(det, 2),
                 "provisional": b_end > cov.standard_until,
             }
         )
