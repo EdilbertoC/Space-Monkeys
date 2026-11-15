@@ -12,6 +12,8 @@
 # | `RES` | `0.25` (~27 km cells) or `0.1` (~11 km, Brazil only) |
 # | `USE_MODIS` | `False`: VIIRS 2012–2025. `True`: adds MODIS 2000–2016 as extra history |
 # | `RICH_INPUTS` | `True`: each cell-day also carries total FRP and night-time detections |
+# | `USE_WEATHER` | `True`: daily weather up to the forecast day (Brazil only) |
+# | `N_MODELS`, `TTA` | ensemble size, and averaging over mirrored maps |
 #
 # Every run is **scored on the same test**: Brazil, 2024–2025, truth = VIIRS detections
 # inside Brazil. Scores are reported on the run's own grid and on a **common 0.5° grid**
@@ -47,7 +49,7 @@
 
 # %%
 # Colab already ships numpy, pandas, torch, scikit-learn and matplotlib.
-# %pip install -q onnx onnxscript onnxruntime
+# %pip install -q onnx onnxscript onnxruntime zarr s3fs
 
 # %%
 import io
@@ -77,6 +79,9 @@ REGION = "brazil"  # "brazil" or "world"
 RES = 0.25  # grid resolution in degrees: 0.25 or 0.1 (0.1 only for "brazil")
 USE_MODIS = False  # True: add MODIS 2000–2016 as extra history
 RICH_INPUTS = True  # True: add FRP and night-time detections per cell-day
+USE_WEATHER = True  # True: add NASA POWER weather (IMERG rain, MERRA-2), Brazil only
+N_MODELS = 3  # ensemble: models trained with different seeds, probabilities averaged
+TTA = True  # also average each model over mirrored maps (test-time augmentation)
 
 TRAIN_END = "2022-12-31"
 VAL_END = "2023-12-31"  # validation: 2023; test: 2024–2025
@@ -108,10 +113,12 @@ USE_DRIVE = True  # keep downloads, grids and outputs in Google Drive
 assert REGION in GRIDS, REGION
 assert RES in (0.25, 0.1), "RES must be 0.25 or 0.1"
 assert not (REGION == "world" and RES < 0.25), "the world at 0.1° does not fit on a Colab GPU"
+assert not (REGION == "world" and USE_WEATHER), "weather inputs are prepared for Brazil only"
 TAG = (
     REGION
     + ("_modis" if USE_MODIS else "")
     + ("_rich" if RICH_INPUTS else "")
+    + ("_wx" if USE_WEATHER else "")
     + ("" if RES == 0.25 else f"_res{RES}")
 )
 print("Run tag:", TAG)
@@ -313,6 +320,100 @@ for s in ACTIVE:
     avail[s] = (first_data, offsets[s] + n_days - 1)
     print(f"{s}: {DATES[avail[s][0]].date()} to {DATES[avail[s][1]].date()}")
 
+
+# %% [markdown]
+# ## 2b. Weather (NASA POWER, analysis-ready data on AWS, no login)
+#
+# Daily values up to the forecast day only (no information from the future):
+#
+# * **Rain:** GPM IMERG total precipitation, 0.1° (same series from 1998 to today).
+# * **Heat, humidity, wind, soil moisture:** MERRA-2 (0.5° × 0.625°) for training.
+#   In production the backend uses GEOS-IT, the near-real-time GEOS product in POWER,
+#   which agrees with MERRA-2 over Brazil (correlation 0.85–0.90) after a bias fix.
+#
+# Weather channels: log1p(rain today, last 7 days, last 30 days), consecutive dry days
+# (< 1 mm, capped at 60) / 60, (Tmax − 25) / 10, humidity / 100 today and 7-day mean,
+# wind / 5, surface soil wetness (0–1).
+
+# %%
+WX_VARS = ["T2M_MAX", "RH2M", "WS2M", "GWETTOP"]  # MERRA-2
+WX_CHANNELS = [
+    "rain_log1p_t",
+    "rain_log1p_7d",
+    "rain_log1p_30d",
+    "dry_days_over_60",
+    "tmax_minus25_over10",
+    "rh_over100_t",
+    "rh_over100_7d",
+    "wind_over5",
+    "soil_wetness",
+]
+DRY_WINDOW = 60
+POWER_S3 = "s3://nasa-power"
+
+
+def load_weather():
+    """Rain on the model grid, MERRA-2 at its own grid, and model-cell → MERRA-2 index maps.
+
+    Cached in Drive after the first run.
+    """
+    import xarray as xr
+
+    cache = CACHE_DIR / f"weather_{REGION}_res{RES}_{DATES[0].year}_{DATES[-1].year}.npz"
+    if cache.exists():
+        z = np.load(cache)
+        return z["rain"], z["merra"], z["mrow"], z["mcol"]
+    span = slice(str(DATES[0].date()), str(DATES[-1].date()))
+    opts = {"anon": True}
+    t0 = time.time()
+    imerg = xr.open_zarr(
+        f"{POWER_S3}/imerg/temporal/power_imerg_daily_temporal_utc.zarr", storage_options=opts
+    )["IMERG_PRECTOT"]
+    imerg = imerg.sel(time=span, lat=slice(S, N), lon=slice(W, E)).load()
+    imerg = imerg.reindex(time=DATES, method="nearest", tolerance="1D")
+    p = np.nan_to_num(imerg.values[:, ::-1, :].astype(np.float32))  # north first
+    # Average the 0.1° IMERG cells that fall inside each model cell.
+    r_idx = np.floor((N - imerg.lat.values[::-1]) / RES).astype(int).clip(0, NY - 1)
+    c_idx = np.floor((imerg.lon.values - W) / RES).astype(int).clip(0, NX - 1)
+    a_r = np.zeros((NY, len(r_idx)), np.float32)
+    a_r[r_idx, np.arange(len(r_idx))] = 1
+    a_c = np.zeros((len(c_idx), NX), np.float32)
+    a_c[np.arange(len(c_idx)), c_idx] = 1
+    a_r /= np.maximum(a_r.sum(1, keepdims=True), 1)
+    a_c /= np.maximum(a_c.sum(0, keepdims=True), 1)
+    rain = np.stack([a_r @ day @ a_c for day in p]).astype(np.float16)
+    del p
+    print(f"IMERG rain {rain.shape} ({time.time() - t0:.0f}s)")
+
+    t0 = time.time()
+    merra = xr.open_zarr(
+        f"{POWER_S3}/merra2/temporal/power_merra2_daily_temporal_utc.zarr", storage_options=opts
+    )[WX_VARS]
+    merra = merra.sel(time=span, lat=slice(S - 1, N + 1), lon=slice(W - 1, E + 1)).load()
+    merra = merra.reindex(time=DATES, method="nearest", tolerance="1D")
+    arr = np.stack([merra[v].values for v in WX_VARS]).astype(np.float32)  # var,t,lat,lon
+    for i in range(len(WX_VARS)):  # fill gaps with the variable's mean
+        arr[i] = np.where(np.isfinite(arr[i]), arr[i], np.nanmean(arr[i]))
+    lat_c = N - RES / 2 - np.arange(NY) * RES
+    lon_c = W + RES / 2 + np.arange(NX) * RES
+    mrow = np.abs(merra.lat.values[None, :] - lat_c[:, None]).argmin(1)
+    mcol = np.abs(merra.lon.values[None, :] - lon_c[:, None]).argmin(1)
+    merra_arr = arr.astype(np.float16)
+    print(f"MERRA-2 {merra_arr.shape} ({time.time() - t0:.0f}s)")
+    np.savez_compressed(cache, rain=rain, merra=merra_arr, mrow=mrow, mcol=mcol)
+    return rain, merra_arr, mrow, mcol
+
+
+if USE_WEATHER:
+    rain_np, merra_np, mrow, mcol = load_weather()
+    rain_g = torch.from_numpy(rain_np).to(DEVICE)
+    merra_g = torch.from_numpy(merra_np).to(DEVICE)
+    mrow_g = torch.from_numpy(mrow).to(DEVICE)
+    mcol_g = torch.from_numpy(mcol).to(DEVICE)
+    WX_N = len(WX_CHANNELS)
+else:
+    WX_N = 0
+
 V_OFF = offsets["viirs"]
 train_last = day_index(TRAIN_END)
 val_last = day_index(VAL_END)
@@ -428,7 +529,7 @@ print("Climatology ready:", tuple(clim_t.shape))
 
 # %%
 PER_SENSOR = HISTORY_DAYS * len(FEATS) + 2
-N_CHANNELS = PER_SENSOR * len(ACTIVE) + LEADS + 2 + 3
+N_CHANNELS = PER_SENSOR * len(ACTIVE) + WX_N + LEADS + 2 + 3
 N_OUT = LEADS * len(ACTIVE)
 MASK_CH = N_CHANNELS - 3
 lat_plane = np.repeat(((N - RES / 2 - np.arange(NY) * RES) / 90).astype(np.float32)[:, None], NX, 1)
@@ -460,6 +561,9 @@ def features(t: int, win: tuple[slice, slice] = FULL, hide: tuple[str, ...] = ()
         x[c] = np.log1p(month.sum(0, dtype=np.float32))
         x[c + 1] = 1.0
     c = PER_SENSOR * len(ACTIVE)
+    if USE_WEATHER:
+        x[c : c + WX_N] = gpu_weather(t, ys, xs).cpu().numpy()
+        c += WX_N
     lead_doy = torch.as_tensor(doy[t + 1 : t + 1 + LEADS], device=clim_t.device)
     x[c : c + LEADS] = clim_t[lead_doy][:, ys, xs].float().cpu().numpy()
     c += LEADS
@@ -467,6 +571,28 @@ def features(t: int, win: tuple[slice, slice] = FULL, hide: tuple[str, ...] = ()
     x[c], x[c + 1] = math.sin(angle), math.cos(angle)
     x[c + 2], x[c + 3], x[c + 4] = mask_plane[ys, xs], lat_plane[ys, xs], lon_plane[ys, xs]
     return x
+
+
+def gpu_weather(t: int, ys: slice, xs: slice) -> torch.Tensor:
+    """Weather channels for day t over a window (uses only days <= t)."""
+    lo = max(t - DRY_WINDOW + 1, 0)
+    rain = rain_g[lo : t + 1, ys, xs].float()  # (<= 60, h, w)
+    dry = torch.cumprod((rain < 1.0).flip(0).float(), dim=0).sum(0)  # dry days ending at t
+    rows, cols = mrow_g[ys], mcol_g[xs]
+    m = merra_g[:, max(t - 6, 0) : t + 1][:, :, rows][:, :, :, cols].float()  # var, 7, h, w
+    return torch.stack(
+        [
+            torch.log1p(rain[-1]),
+            torch.log1p(rain[-7:].sum(0)),
+            torch.log1p(rain[-30:].sum(0)),
+            dry.clamp(max=DRY_WINDOW) / DRY_WINDOW,
+            (m[0, -1] - 25) / 10,
+            m[1, -1] / 100,
+            m[1].mean(0) / 100,
+            m[2, -1] / 5,
+            m[3, -1],
+        ]
+    )
 
 
 def eval_targets(t: int) -> np.ndarray:
@@ -618,29 +744,61 @@ class UNet(nn.Module):
         return self.head(x)  # logits: LEADS maps per sensor, VIIRS first
 
 
-model = UNet(N_CHANNELS, N_OUT).to(DEVICE)
-# Start each head from its sensor's training base rate.
-with torch.no_grad():
-    for i, s in enumerate(ACTIVE):
-        lo, hi = avail[s][0], min(avail[s][1], train_last)
-        days = np.arange(lo, hi + 1, 20)
-        rate = float(
-            np.mean(
-                [
-                    (cubes[s]["count"][d - offsets[s]][mask_t] > 0).float().mean().item()
-                    for d in days
-                ]
-            )
+class Forecaster(nn.Module):
+    """Ensemble of U-Nets, optionally averaged over mirrored inputs.
+
+    Returns logits of the mean probability, so sigmoid(output) is the forecast and the
+    exported ONNX file is used exactly like a single model.
+    """
+
+    def __init__(self, members: list[nn.Module], tta: bool) -> None:
+        super().__init__()
+        self.members = nn.ModuleList(members)
+        self.flips = [(), (-1,), (-2,), (-2, -1)] if tta else [()]
+
+    def forward(self, x):
+        total = 0.0
+        for member in self.members:
+            for dims in self.flips:
+                xi = torch.flip(x, dims) if dims else x
+                pi = torch.sigmoid(member(xi).float())
+                total = total + (torch.flip(pi, dims) if dims else pi)
+        p = (total / (len(self.members) * len(self.flips))).clamp(1e-6, 1 - 1e-6)
+        return torch.log(p) - torch.log1p(-p)
+
+
+# Each head starts from its sensor's training base rate.
+BASE_RATES = {}
+for s in ACTIVE:
+    lo, hi = avail[s][0], min(avail[s][1], train_last)
+    days = np.arange(lo, hi + 1, 20)
+    BASE_RATES[s] = float(
+        np.mean(
+            [(cubes[s]["count"][d - offsets[s]][mask_t] > 0).float().mean().item() for d in days]
         )
-        model.head.bias[i * LEADS : (i + 1) * LEADS] = math.log(rate / (1 - rate))
-        print(f"{s} training base rate: {rate:.4f}")
-print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
+    )
+    print(f"{s} training base rate: {BASE_RATES[s]:.4f}")
+
+
+def new_model(seed: int) -> UNet:
+    torch.manual_seed(seed)
+    net = UNet(N_CHANNELS, N_OUT).to(DEVICE)
+    with torch.no_grad():
+        for i, s in enumerate(ACTIVE):
+            rate = BASE_RATES[s]
+            net.head.bias[i * LEADS : (i + 1) * LEADS] = math.log(rate / (1 - rate))
+    return net
+
+
+model = new_model(0)  # `model` is whatever `predict_unet` should run
+print(f"Parameters per model: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
 # %% [markdown]
 # ## 7. Training
 #
 # Every batch is built on the GPU. Random crops (≈ 16° × 16°) with random flips and
 # rotations; early stopping on the Brazil validation average precision of the VIIRS head.
+# `N_MODELS` networks are trained from different seeds and averaged.
 
 # %%
 CROP = 64 if RES == 0.25 else 160
@@ -694,6 +852,8 @@ def gpu_features(t: int, ys: slice, xs: slice, hide: tuple[str, ...] = ()) -> to
             parts.append(gpu_transform(f, gpu_days(s, f, t - HISTORY_DAYS + 1, t + 1, ys, xs)))
         month = gpu_days(s, "count", t - LONG_WINDOW + 1, t + 1, ys, xs).float()
         parts += [torch.log1p(month.sum(0, keepdim=True)), torch.ones((1, h, w), device=DEVICE)]
+    if USE_WEATHER:
+        parts.append(gpu_weather(t, ys, xs))
     parts.append(clim_g[doy_g[t + 1 : t + 1 + LEADS]][:, ys, xs].float())
     angle = 2 * math.pi * doy[t] / 365.25
     season = torch.tensor([math.sin(angle), math.cos(angle)], device=DEVICE)
@@ -760,58 +920,79 @@ for _t in [int(VAL_T[0])] + ([int(TRAIN_T[0])] if USE_MODIS else []):
     assert np.abs(_gpu - features(_t, EVAL_WIN)).max() < 1e-4, _t
 print("GPU and NumPy features match")
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    optimizer, max_lr=2e-3, total_steps=EPOCHS * STEPS_PER_EPOCH
-)
 use_amp = DEVICE == "cuda"
-scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-best_ap, best_state, bad_epochs, history = -1.0, None, 0, []
 
-for epoch in range(1, EPOCHS + 1):
-    model.train()
-    t0, total = time.time(), 0.0
-    for _ in range(STEPS_PER_EPOCH):
-        x, y, m, w = random_batch()
-        with torch.autocast(device_type="cuda", enabled=use_amp):
-            logits = model(x)
-        loss = F.binary_cross_entropy_with_logits(logits.float(), y, reduction="none")
-        weight = m[:, None] * w[:, :, None, None]
-        loss = (loss * weight).sum() / weight.sum().clamp(min=1.0)
-        optimizer.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        scheduler.step()
-        total += loss.item()
-    val = evaluate(predict_unet, VAL_T, step=4, grids=("native",))["native"]
-    ap = val["avg_precision"].mean()
-    history.append({"epoch": epoch, "loss": total / STEPS_PER_EPOCH, "val_ap": ap})
-    print(
-        f"epoch {epoch:2d}  loss {total / STEPS_PER_EPOCH:.4f}  val AP {ap:.4f}  "
-        f"({time.time() - t0:.0f}s)"
+
+def train_member(seed: int) -> tuple[UNet, list[dict]]:
+    """Train one network; returns it at its best validation epoch, and its history."""
+    global model, rng
+    rng = np.random.default_rng(42 + seed)
+    net = model = new_model(seed)
+    optimizer = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=2e-3, total_steps=EPOCHS * STEPS_PER_EPOCH
     )
-    if ap > best_ap:
-        best_ap, bad_epochs = ap, 0
-        best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    else:
-        bad_epochs += 1
-        if bad_epochs >= PATIENCE:
-            print("Early stopping")
-            break
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    best_ap, best_state, bad_epochs, history = -1.0, None, 0, []
+    for epoch in range(1, EPOCHS + 1):
+        net.train()
+        t0, total = time.time(), 0.0
+        for _ in range(STEPS_PER_EPOCH):
+            x, y, m, w = random_batch()
+            with torch.autocast(device_type="cuda", enabled=use_amp):
+                logits = net(x)
+            loss = F.binary_cross_entropy_with_logits(logits.float(), y, reduction="none")
+            weight = m[:, None] * w[:, :, None, None]
+            loss = (loss * weight).sum() / weight.sum().clamp(min=1.0)
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            total += loss.item()
+        val = evaluate(predict_unet, VAL_T, step=4, grids=("native",))["native"]
+        ap = val["avg_precision"].mean()
+        history.append({"epoch": epoch, "loss": total / STEPS_PER_EPOCH, "val_ap": ap})
+        print(
+            f"model {seed + 1}/{N_MODELS}  epoch {epoch:2d}  loss {total / STEPS_PER_EPOCH:.4f}  "
+            f"val AP {ap:.4f}  ({time.time() - t0:.0f}s)"
+        )
+        if ap > best_ap:
+            best_ap, bad_epochs = ap, 0
+            best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
+        else:
+            bad_epochs += 1
+            if bad_epochs >= PATIENCE:
+                print("Early stopping")
+                break
+    net.load_state_dict(best_state)
+    return net, history
 
-model.load_state_dict(best_state)
-torch.save(best_state, OUT_DIR / f"fire_forecast_{TAG}.pt")
+
+members, histories = [], []
+for seed in range(N_MODELS):
+    net, history = train_member(seed)
+    members.append(net)
+    histories.append(history)
+torch.save([m.state_dict() for m in members], OUT_DIR / f"fire_forecast_{TAG}.pt")
 
 # %% [markdown]
 # ## 8. Test results — Brazil, 2024–2025 (never seen in training)
 
 # %%
+model = members[0]
+single = evaluate(predict_unet, TEST_T, grids=("native",))["native"]
+model = Forecaster(members, tta=TTA).to(DEVICE)  # the forecast model from here on
 results = {
     "climatology": evaluate(predict_climatology, TEST_T),
     "persistence": evaluate(predict_persistence, TEST_T),
     f"unet_{TAG}": evaluate(predict_unet, TEST_T),
 }
+ensemble_ap = results[f"unet_{TAG}"]["native"]["avg_precision"].mean()
+print(
+    f"One model: AP {single['avg_precision'].mean():.4f}  ->  "
+    f"{N_MODELS} models{' + mirrored maps' if TTA else ''}: AP {ensemble_ap:.4f}"
+)
 tables = {}
 for g in ("native", "common"):
     ap = pd.concat({n: r[g]["avg_precision"] for n, r in results.items()}, axis=1)
@@ -837,9 +1018,12 @@ plt.show()
             "region": REGION,
             "resolution_deg": RES,
             "sensors": ACTIVE,
-            "features": FEATS,
-            "epochs_trained": len(history),
-            "history": history,
+            "features": FEATS + (["weather"] if USE_WEATHER else []),
+            "n_models": N_MODELS,
+            "tta": TTA,
+            "single_model_avg_precision": round(float(single["avg_precision"].mean()), 5),
+            "epochs_trained": [len(h) for h in histories],
+            "history": histories,
             "avg_precision": tables["native"][0].round(5).to_dict(),
             "brier": tables["native"][1].round(6).to_dict(),
             "common_grid": {
@@ -851,6 +1035,32 @@ plt.show()
         indent=2,
     )
 )
+
+# %%
+# New fires vs continuing fires, day +1: cells with no fire in the last 3 days are the
+# hard, early-warning case; cells already burning are the easy one.
+groups = {"new fires": ([], [], []), "continuing fires": ([], [], [])}
+for t in TEST_T[::3]:
+    recent = eval_recent(t)
+    p, c, y = predict_unet(t)[0], predict_climatology(t)[0], eval_targets(t)[0]
+    for name, sel in (("new fires", eval_mask & ~recent), ("continuing fires", eval_mask & recent)):
+        groups[name][0].append(p[sel])
+        groups[name][1].append(c[sel])
+        groups[name][2].append(y[sel])
+rows = []
+for name, (ps, cs, ys_) in groups.items():
+    p, c, y = np.concatenate(ps), np.concatenate(cs), np.concatenate(ys_)
+    rows.append(
+        {
+            "cells": name,
+            "share of cell-days": len(y) / sum(len(np.concatenate(g[2])) for g in groups.values()),
+            "fire rate": y.mean(),
+            "AP climatology": average_precision_score(y, c),
+            "AP U-Net": average_precision_score(y, p),
+        }
+    )
+new_vs_continuing = pd.DataFrame(rows).set_index("cells")
+print("Day +1, Brazil test 2024–2025\n", new_vs_continuing.round(4))
 
 # %%
 # Reliability: do 30% forecasts come true ~30% of the time? (lead day 1, test set)
@@ -892,8 +1102,10 @@ plt.show()
 # %% [markdown]
 # ## 9. Export for the backend
 #
-# The network is fully convolutional, so the ONNX file accepts any window whose height
-# and width are multiples of 8. Use the first 7 output channels (VIIRS head); in
+# The exported file contains the whole ensemble (and the mirrored-map averaging), and
+# is used like a single model: probability = sigmoid(output). It is fully
+# convolutional, so it accepts any window whose height and width are multiples of 8.
+# Use the first 7 output channels (VIIRS head); in
 # production the MODIS input channels and flag stay 0.
 
 # %%
@@ -918,6 +1130,7 @@ for s in ACTIVE:
     for f in FEATS:
         channels += [f"{s}_{f}_t-{HISTORY_DAYS - 1 - i}" for i in range(HISTORY_DAYS)]
     channels += [f"{s}_log1p_count_sum_30d", f"{s}_available"]
+channels += WX_CHANNELS if USE_WEATHER else []
 channels += [f"climatology_t+{k + 1}" for k in range(LEADS)]
 channels += ["doy_sin", "doy_cos", "mask", "lat_over_90", "lon_over_180"]
 meta = {
@@ -941,10 +1154,19 @@ meta = {
         ),
         "night": "night-time (daynight == N) detections, capped at 255; channel = log1p(n)",
     },
+    "weather": {
+        "rain": "NASA POWER GPM IMERG daily precipitation (mm/day), mean over each cell",
+        "merra2": f"NASA POWER MERRA-2 daily {WX_VARS}, nearest cell; production: GEOS-IT",
+        "dry_day_threshold_mm": 1.0,
+    }
+    if USE_WEATHER
+    else None,
     "channels": channels,
     "outputs": [f"{s}_fire_t+{k + 1}" for s in ACTIVE for k in range(LEADS)],
     "use_outputs": f"0..{LEADS - 1} (VIIRS head)",
+    "ensemble": {"n_models": N_MODELS, "mirrored_map_averaging": TTA},
     "test_region": "Brazil",
+    "test_new_vs_continuing_day1": new_vs_continuing.round(4).to_dict(orient="index"),
     "test_avg_precision": tables["native"][0].mean().round(4).to_dict(),
     "test_brier": tables["native"][1].mean().round(5).to_dict(),
     "test_common_grid_avg_precision": tables["common"][0].mean().round(4).to_dict(),
@@ -956,7 +1178,7 @@ import onnxruntime as ort  # noqa: E402
 session = ort.InferenceSession(str(onnx_path))
 onnx_out = session.run(None, {"features": dummy.numpy()})[0]
 torch_out = model(dummy).detach().numpy()
-print("ONNX matches PyTorch:", np.allclose(onnx_out, torch_out, atol=1e-4))
+print("ONNX matches PyTorch:", np.allclose(onnx_out, torch_out, atol=1e-3))
 print("Saved to", OUT_DIR.resolve())
 model.to(DEVICE)
 

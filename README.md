@@ -89,6 +89,11 @@ GOES pixel positions are computed from the GOES-R fixed-grid projection (PUG Vol
 
 - **Data:** NASA FIRMS VIIRS S-NPP yearly archive, 2012–2025 (presumed vegetation fires, nominal/high confidence), downloaded inside the notebook.
 - **Two training regions:** `REGION = "brazil"` learns from Brazil only; `REGION = "world"` learns from every country. Every run is scored on the same Brazil test (same cells, days and Brazil-only VIIRS truth), and the last section of the notebook compares all runs.
+- **Rich inputs (`RICH_INPUTS`):** besides the fire-pixel count, each cell-day carries the total fire radiative power and the number of night-time detections, summarizing the 375 m detections inside the cell.
+- **Weather (`USE_WEATHER`, Brazil):** rain today / last 7 / last 30 days and consecutive dry days (GPM IMERG), maximum temperature, humidity, wind and surface soil wetness (MERRA-2), all up to the forecast day only, from NASA POWER.
+- **Grid (`RES`):** 0.25° (~27 km) or 0.1° (~11 km, Brazil). Runs are also scored on a common 0.5° grid so different resolutions compare fairly.
+- **Ensemble (`N_MODELS`, `TTA`):** several networks trained from different seeds, averaged, each also averaged over mirrored maps; exported as one ONNX file. The notebook prints the single-model score next to the ensemble's.
+- **New vs continuing fires:** the test section scores day +1 separately for cells with no fire in the last 3 days (the early-warning case) and cells already burning.
 - **Optional MODIS history (`USE_MODIS = True`):** adds MODIS C6.1 2000–2016. VIIRS sees about twice as many fire cell-days as MODIS, so the two are never mixed: each sensor has its own input channels and an "available" flag, and the network has one output head per sensor. The 2012–2016 overlap teaches how they relate, and MODIS inputs are randomly hidden there so the model runs on VIIRS alone from 2017 on and in production.
 - **Model:** small 2D U-Net (~1.9 M parameters). Inputs are image channels: the last 7 days of fire maps, the last 30 days, the climatology of each target day, seasonality and position.
 - **Evaluation:** time-based split (train 2012–2022, validation 2023, test 2024–2025), scored with average precision and Brier score against two references: climatology and persistence.
@@ -178,6 +183,14 @@ We acknowledge the use of data and imagery from LANCE FIRMS operated by NASA's E
 
 License: NASA Earth science data are openly shared without restriction under the [EOSDIS Data Use Policy](https://www.earthdata.nasa.gov/engage/open-data-services-software-policies/data-use-guidance).
 
+### NASA POWER (weather inputs of the forecast model)
+
+- NASA Prediction Of Worldwide Energy Resources (POWER) Project, NASA Langley Research Center. NASA POWER Data v10. https://power.larc.nasa.gov/ — analysis-ready Zarr stores on AWS Open Data: https://registry.opendata.aws/nasa-power/ (`s3://nasa-power`, no login).
+- **GPM IMERG daily precipitation** (`IMERG_PRECTOT`, 0.1°): `imerg/temporal/power_imerg_daily_temporal_utc.zarr`
+- **MERRA-2 daily meteorology** (`T2M_MAX`, `RH2M`, `WS2M`, `GWETTOP`, 0.5° × 0.625°): `merra2/temporal/power_merra2_daily_temporal_utc.zarr`
+
+License: CC-BY-4.0 (attribution above, as required by the dataset's `CITATION.cff`).
+
 ### NOAA GOES-R Series
 
 - **GOES-19 (GOES-East) ABI L2+ Fire/Hot Spot Characterization, Full Disk** (`ABI-L2-FDCF`), every 10 min, ~2 km at nadir. NOAA / GOES-R Series Program.
@@ -203,6 +216,8 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | FastAPI, Pydantic, pydantic-settings, pytest, Ruff, ONNX Runtime | MIT |
 | Uvicorn, httpx, NumPy, pandas, SciPy, h5netcdf, h5py, PyTorch, scikit-learn | BSD-3-Clause |
 | xarray, ONNX, onnxscript, Requests | Apache-2.0 |
+| Zarr | MIT |
+| s3fs, fsspec | BSD-3-Clause |
 | Matplotlib | Matplotlib License (PSF-based) |
 | Python | PSF License |
 
