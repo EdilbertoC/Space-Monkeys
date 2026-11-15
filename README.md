@@ -51,7 +51,7 @@ The `/history` routes read a folder built by the pipeline (`python -m pipeline.s
 
 **Contract with the frontend: [docs/api/openapi.yaml](docs/api/openapi.yaml)** (OpenAPI 3.1). It lists everything the backend offers, with the exact meaning of every number (observed counts vs MODIS-equivalent expected counts). Every example in it is a real response of this API on the FIRMS archive (Pantanal biome). `tests/test_openapi.py` checks that the spec is valid, that every example matches its schema, and that every route the API serves is in the contract; `tests/test_history_api.py` checks the `/history` responses against the same schemas.
 
-Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`.
+Burning activity calendar (`app/api/history.py`, `app/history/`). Every route takes exactly one area: `bbox=w,s,e,n`, `biome=` (IBGE 2019) or `area_id=` from `POST /history/areas`. Series: `harmonized` (default), `modis`, `viirs`. The routes that compare years (climatology, anomaly, season, trend) answer `series=viirs` with 422: it counts fire seen by any VIIRS satellite, so it steps up when NOAA-20 (2018, about +50% fire cell-days over S-NPP alone) and NOAA-21 (2023, about +80%) join.
 
 | Method | Path | Returns |
 | --- | --- | --- |

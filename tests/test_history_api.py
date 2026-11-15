@@ -198,6 +198,28 @@ def test_analytics_need_enough_years(client):
         assert client.get(path, params=params).status_code == 422, path
 
 
+@pytest.mark.parametrize(
+    ("route", "params"),
+    [
+        ("climatology", {}),
+        ("anomaly", {"start": "2020-09-01", "end": "2020-09-30"}),
+        ("season", {"year": 2020}),
+        ("trend", {}),
+    ],
+)
+def test_viirs_is_refused_where_years_are_compared(client, route, params):
+    r = client.get(f"/history/{route}", params={"biome": "Pantanal", "series": "viirs", **params})
+    assert r.status_code == 422
+    assert "NOAA-20" in r.json()["detail"]
+
+
+def test_calendar_and_map_still_show_viirs(client):
+    period = {"biome": "Pantanal", "start": "2020-09-01", "end": "2020-09-30"}
+    cal = client.get("/history/calendar", params={**period, "granularity": "month"}).json()
+    assert cal["buckets"][0]["viirs"] == 1
+    assert client.get("/history/map", params=period).json()["cells"][0]["viirs"] == 1
+
+
 def test_history_unavailable_without_data(tmp_path, monkeypatch):
     monkeypatch.setenv("ENABLE_WORKER", "false")
     monkeypatch.setenv("HISTORY_DATA_DIR", str(tmp_path / "missing"))

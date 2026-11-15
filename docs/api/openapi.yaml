@@ -2,7 +2,7 @@
 openapi: 3.1.0
 info:
   title: Space Monkeys API
-  version: 0.5.0
+  version: 0.6.0
   summary: Burning activity calendar from harmonized MODIS and VIIRS fire hotspots, plus a real-time fire pulse.
   description: |
     Contract between the Space Monkeys backend and frontend. It lists everything the
@@ -21,7 +21,9 @@ info:
         fire. An integer. The long, consistent record (2000-11-01 to the end of MODIS).
       - `viirs`: **observed count** of cell-days where any VIIRS satellite detected
         fire (2012-01-20 on). An integer. Not comparable across years: NOAA-20 (2018)
-        and NOAA-21 (2023) add detections.
+        and NOAA-21 (2023) add detections (about +50% and +80% fire cell-days over
+        S-NPP alone). The calendar and the map show it; the routes that compare
+        years (climatology, anomaly, season, trend) answer `series=viirs` with 422.
       - `harmonized`: **MODIS-equivalent fire cell-days**, the series the calendar
         should show. A number with a 90% interval (`value`, `low`, `high`). It comes
         from one of two sources, reported per bucket in `harmonized_source`:
@@ -639,7 +641,7 @@ components:
     series:
       name: series
       in: query
-      description: Which series to compute on. Defaults to harmonized; until harmonization is available, the server answers `harmonized` requests with 409 and the client should fall back to `modis`.
+      description: Which series to compute on. Defaults to harmonized; until harmonization is available, the server answers `harmonized` requests with 409 and the client should fall back to `modis`. `viirs` is answered with 422 here, because it is not comparable across years.
       schema: { $ref: "#/components/schemas/Series" }
     base_start_year:
       name: base_start_year
