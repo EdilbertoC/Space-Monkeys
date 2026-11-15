@@ -189,6 +189,8 @@ for _s in ACTIVE:
     _days = day_index(f"{SENSORS[_s]['last']}-12-31") - day_index(f"{SENSORS[_s]['first']}-01-01")
     _bytes += (_days + 1) * NY * NX * len(FEATS)  # one byte per feature
 _bytes += 366 * NY * NX * 2  # climatology, float16
+if USE_WEATHER:
+    _bytes += len(DATES) * NY * NX * 2  # rain, float16 (MERRA-2 is small)
 print(f"Daily cubes + climatology need ~{_bytes / 1e9:.1f} GB on the {DEVICE}")
 if DEVICE == "cuda":
     _free = torch.cuda.mem_get_info()[0]
@@ -359,7 +361,7 @@ POWER_S3 = "s3://nasa-power"
 def load_weather():
     """Rain on the model grid, MERRA-2 at its own grid, and model-cell → MERRA-2 index maps.
 
-    Cached in Drive after the first run.
+    Read one year at a time so system RAM stays low; cached in Drive after the first run.
     """
     import xarray as xr
 
@@ -367,16 +369,15 @@ def load_weather():
     if cache.exists():
         z = np.load(cache)
         return z["rain"], z["merra"], z["mrow"], z["mcol"]
-    span = slice(str(DATES[0].date()), str(DATES[-1].date()))
     opts = {"anon": True}
-    t0 = time.time()
     imerg = xr.open_zarr(
         f"{POWER_S3}/imerg/temporal/power_imerg_daily_temporal_utc.zarr", storage_options=opts
-    )["IMERG_PRECTOT"]
-    imerg = imerg.sel(time=span, lat=slice(S, N), lon=slice(W, E)).load()
-    imerg = imerg.reindex(time=DATES, method="nearest", tolerance="1D")
-    p = np.nan_to_num(imerg.values[:, ::-1, :].astype(np.float32))  # north first
-    # Average the 0.1° IMERG cells that fall inside each model cell.
+    )["IMERG_PRECTOT"].sel(lat=slice(S, N), lon=slice(W, E))
+    merra = xr.open_zarr(
+        f"{POWER_S3}/merra2/temporal/power_merra2_daily_temporal_utc.zarr", storage_options=opts
+    )[WX_VARS].sel(lat=slice(S - 1, N + 1), lon=slice(W - 1, E + 1))
+
+    # Weights that average the 0.1° IMERG cells falling inside each model cell.
     r_idx = np.floor((N - imerg.lat.values[::-1]) / RES).astype(int).clip(0, NY - 1)
     c_idx = np.floor((imerg.lon.values - W) / RES).astype(int).clip(0, NX - 1)
     a_r = np.zeros((NY, len(r_idx)), np.float32)
@@ -385,25 +386,32 @@ def load_weather():
     a_c[np.arange(len(c_idx)), c_idx] = 1
     a_r /= np.maximum(a_r.sum(1, keepdims=True), 1)
     a_c /= np.maximum(a_c.sum(0, keepdims=True), 1)
-    rain = np.stack([a_r @ day @ a_c for day in p]).astype(np.float16)
-    del p
-    print(f"IMERG rain {rain.shape} ({time.time() - t0:.0f}s)")
 
-    t0 = time.time()
-    merra = xr.open_zarr(
-        f"{POWER_S3}/merra2/temporal/power_merra2_daily_temporal_utc.zarr", storage_options=opts
-    )[WX_VARS]
-    merra = merra.sel(time=span, lat=slice(S - 1, N + 1), lon=slice(W - 1, E + 1)).load()
-    merra = merra.reindex(time=DATES, method="nearest", tolerance="1D")
-    arr = np.stack([merra[v].values for v in WX_VARS]).astype(np.float32)  # var,t,lat,lon
-    for i in range(len(WX_VARS)):  # fill gaps with the variable's mean
-        arr[i] = np.where(np.isfinite(arr[i]), arr[i], np.nanmean(arr[i]))
+    rain = np.zeros((len(DATES), NY, NX), dtype=np.float16)
+    merra_arr = np.zeros(
+        (len(WX_VARS), len(DATES), merra.sizes["lat"], merra.sizes["lon"]), dtype=np.float16
+    )
+    for year in range(DATES[0].year, DATES[-1].year + 1):
+        t0 = time.time()
+        days = DATES[DATES.year == year]
+        i0 = day_index(days[0])
+        span = slice(str(days[0].date()), str(days[-1].date()))
+        chunk = imerg.sel(time=span).load().reindex(time=days, method="nearest", tolerance="1D")
+        for k, day in enumerate(chunk.values):
+            rain[i0 + k] = a_r @ np.nan_to_num(day[::-1].astype(np.float32)) @ a_c  # north first
+        del chunk
+        m = merra.sel(time=span).load().reindex(time=days, method="nearest", tolerance="1D")
+        for v, name in enumerate(WX_VARS):
+            values = m[name].values.astype(np.float32)
+            fill = np.nanmean(values) if np.isfinite(values).any() else 0.0
+            merra_arr[v, i0 : i0 + len(days)] = np.where(np.isfinite(values), values, fill)
+        del m
+        print(f"weather {year} ready ({time.time() - t0:.0f}s)")
+
     lat_c = N - RES / 2 - np.arange(NY) * RES
     lon_c = W + RES / 2 + np.arange(NX) * RES
     mrow = np.abs(merra.lat.values[None, :] - lat_c[:, None]).argmin(1)
     mcol = np.abs(merra.lon.values[None, :] - lon_c[:, None]).argmin(1)
-    merra_arr = arr.astype(np.float16)
-    print(f"MERRA-2 {merra_arr.shape} ({time.time() - t0:.0f}s)")
     np.savez_compressed(cache, rain=rain, merra=merra_arr, mrow=mrow, mcol=mcol)
     return rain, merra_arr, mrow, mcol
 
@@ -412,6 +420,7 @@ if USE_WEATHER:
     rain_np, merra_np, mrow, mcol = load_weather()
     rain_g = torch.from_numpy(rain_np).to(DEVICE)
     merra_g = torch.from_numpy(merra_np).to(DEVICE)
+    del rain_np, merra_np  # they live on the GPU from here on
     mrow_g = torch.from_numpy(mrow).to(DEVICE)
     mcol_g = torch.from_numpy(mcol).to(DEVICE)
     if FUTURE_WEATHER:  # observed weather of the target days (perfect forecast)
