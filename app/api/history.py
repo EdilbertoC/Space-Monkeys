@@ -146,11 +146,12 @@ def calendar(
         raise HTTPException(413, f"more than {store.limits['max_day_buckets']} daily buckets")
     daily = store.daily(area, start, end)
     band = store.estimate_band(area) if store.coverage.estimate else (0.0, 0.0)
+    det_band = store.detected_band(area) if store.coverage.layers else (0.0, 0.0)
     return {
         "area": area.as_summary(),
         "unit": "fire_cell_days",
         "granularity": granularity,
-        "buckets": an.calendar(daily, start, end, granularity, store.coverage, band),
+        "buckets": an.calendar(daily, start, end, granularity, store.coverage, band, det_band),
     }
 
 
@@ -255,8 +256,9 @@ def fire_map(
     cov = store.coverage
     has_modis = start <= cov.modis[1] and end >= cov.modis[0]
     has_viirs = start <= cov.viirs[1] and end >= cov.viirs[0]
+    has_layer = cov.layers is not None and start <= cov.layers[1] and end >= cov.layers[0]
     out = []
-    for cell_id, modis, viirs, harm in cells.itertuples(index=False):
+    for cell_id, modis, viirs, harm, only in cells.itertuples(index=False):
         r, c = int(cell_id) // 3600, int(cell_id) % 3600
         out.append(
             {
@@ -266,6 +268,7 @@ def fire_map(
                 "harmonized": round(float(harm), 2),
                 "modis": int(modis) if has_modis else None,
                 "viirs": int(viirs) if has_viirs else None,
+                "viirs_only": round(float(only), 2) if has_layer else None,
             }
         )
     return {

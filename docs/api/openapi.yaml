@@ -936,8 +936,10 @@ components:
           type: [number, "null"]
           description: VIIRS-only layer (expected fire cell-days only VIIRS sees); null outside the layer.
         detected:
-          type: [number, "null"]
-          description: VIIRS estimate + VIIRS-only layer (expected cell-days seen by MODIS or the satellite); null outside the layer.
+          description: VIIRS estimate + VIIRS-only layer (expected cell-days seen by MODIS or the satellite), with its 90% interval from the monthly errors against the observed union on the reference years; null outside the layer.
+          oneOf:
+            - { $ref: "#/components/schemas/Interval" }
+            - { type: "null" }
         provisional: { type: boolean }
 
     Calendar:
@@ -1091,6 +1093,9 @@ components:
                   the cells where VIIRS saw activity. Per-cell values are much less
                   certain than area totals.
               modis: { type: [integer, "null"], description: Observed MODIS fire cell-days. }
+              viirs_only:
+                type: [number, "null"]
+                description: VIIRS-only layer in this cell (expected fire cell-days only VIIRS sees, small fires); null when the period is outside the layer.
               viirs: { type: [integer, "null"], description: Observed VIIRS fire cell-days. }
 
     PointGeometry:

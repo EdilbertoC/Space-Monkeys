@@ -315,7 +315,15 @@ def test_viirs_only_layer_and_its_check(report_and_cube, tmp_path, monkeypatch):
         conforms(body, "Calendar")
         b = next(b for b in body["buckets"] if b["start"] <= "2020-09-18" <= b["end"])
         assert b["viirs_only"] == pytest.approx(0.75)
-        assert b["detected"] == pytest.approx(0.5 + 0.75)
+        assert b["detected"]["value"] == pytest.approx(0.5 + 0.75)
+        # too few months here for a band: the interval collapses to the value
+        assert b["detected"]["low"] == b["detected"]["high"] == b["detected"]["value"]
+        cells = c.get(
+            "/history/map",
+            params={"bbox": "-61,-16,-54,-14", "start": "2020-09-01", "end": "2020-09-30"},
+        ).json()
+        conforms(cells, "Map")
+        assert [x["viirs_only"] for x in cells["cells"]] == pytest.approx([0.75])
         assert b["harmonized"]["value"] == 1  # MODIS observed (Aqua) is still served
         r = c.get("/history/trend", params={"bbox": "-61,-16,-54,-14", "series": "detected"})
         assert r.status_code == 200  # comparable across years: one satellite at a time

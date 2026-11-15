@@ -86,7 +86,7 @@ Burning activity calendar (`app/api/history.py`, `app/history/`). Every route ta
 | GET | `/history/anomaly?start&end&series` | The period against the same calendar dates in every other base year: percentile, class below/normal/above/record |
 | GET | `/history/season?year&series` | Season start (10%), peak and end (90%) weeks, against the normal season |
 | GET | `/history/trend?series&start_year&end_year` | Yearly totals and Theil–Sen slope with 95% CI |
-| GET | `/history/map?start&end` | Fire cell-days per 0.1° cell with fire |
+| GET | `/history/map?start&end` | Fire cell-days per 0.1° cell with fire, including the VIIRS-only layer (where the small fires are) |
 
 The API never runs a model: it sums the serving table with DuckDB (about 0.1 s for a season, about 1 s for 23 years of a biome). Today MODIS still delivers data, so the harmonized series equals MODIS (source `modis`, interval of zero width); the VIIRS estimate is served after MODIS ends or after `pipeline.serving --switch-date`. Its interval is the monthly per-biome 90% band weighted by the area's biome shares, an approximation that is too narrow for small areas.
 
@@ -446,7 +446,7 @@ The MODIS-equivalent record drops the small fires only VIIRS detects. `pipeline.
 | `viirs_only` | Σ (1 − p): small fires only VIIRS detects | 2012 |
 | `detected` | harmonized estimate + `viirs_only`: cell-days with fire seen by MODIS or the satellite | 2012 |
 
-Both new series count one satellite at a time (S-NPP, then NOAA-20), so they are comparable across years. `detected` is the expected size of the union of the two sensors' detections, so it is scored against the observed union (MODIS or S-NPP saw fire) on the reference years; the score is in `GET /history/meta` → `harmonization.layers.check`. It needs no retraining: `python -m pipeline.serving brazil` computes it from the saved estimate and gap factors. Details in [docs/methodology.md](docs/methodology.md#keeping-what-only-viirs-sees-the-viirs-only-layer).
+In the calendar, `detected` carries a 90% interval from its monthly errors against the observed union, per biome; the map gives `viirs_only` per cell, which shows where the small fires are. Both new series count one satellite at a time (S-NPP, then NOAA-20), so they are comparable across years. `detected` is the expected size of the union of the two sensors' detections, so it is scored against the observed union (MODIS or S-NPP saw fire) on the reference years; the score is in `GET /history/meta` → `harmonization.layers.check`. It needs no retraining: `python -m pipeline.serving brazil` computes it from the saved estimate and gap factors. Details in [docs/methodology.md](docs/methodology.md#keeping-what-only-viirs-sees-the-viirs-only-layer).
 
 ### Bridging the next satellite (NOAA-21)
 

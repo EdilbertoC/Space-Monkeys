@@ -140,7 +140,8 @@ class HistoryStore:
             f"read_parquet('{cell_day}/**/*.parquet', hive_partitioning = true)"
         )
         columns = {r[0] for r in self.con.execute("DESCRIBE cell_day").fetchall()}
-        self._fine = "coalesce(sum(fine), 0)" if "fine" in columns else "0.0"  # older tables
+        self._has_fine = "fine" in columns  # older tables have no VIIRS-only layer
+        self._fine = "coalesce(sum(fine), 0)" if self._has_fine else "0.0"
         biome_file = (self.data_dir / "cell_biome.parquet").as_posix()
         self.con.execute(
             f"CREATE TABLE cell_biome AS SELECT cell_id, biome FROM read_parquet('{biome_file}')"
@@ -265,7 +266,16 @@ class HistoryStore:
     def estimate_band(self, area: Area) -> tuple[float, float]:
         """90% band of the VIIRS estimate for this area: the monthly per-biome bands
         weighted by the area's share of each biome (an approximation)."""
-        bands = self.meta["harmonization"].get("interval_90_monthly_by_biome") or {}
+        return self._band(area, self.meta["harmonization"].get("interval_90_monthly_by_biome"))
+
+    def detected_band(self, area: Area) -> tuple[float, float]:
+        """90% band of `detected` (estimate + VIIRS-only layer) for this area, from its
+        monthly errors against the observed union on the reference years."""
+        check = (self.meta["harmonization"].get("layers") or {}).get("check") or {}
+        return self._band(area, check.get("interval_90_monthly_by_biome"))
+
+    def _band(self, area: Area, bands: dict | None) -> tuple[float, float]:
+        bands = bands or {}
         shares = {b: s for b, s in self.biome_shares(area).items() if b in bands}
         total = sum(shares.values())
         if not total:
@@ -311,7 +321,8 @@ class HistoryStore:
                    sum(viirs) AS viirs,
                    sum(CASE WHEN date <= DATE '{m_end}' THEN modis
                             WHEN date BETWEEN DATE '{e0.isoformat()}' AND DATE '{e1.isoformat()}'
-                            THEN coalesce(est, 0) ELSE 0 END) AS harmonized
+                            THEN coalesce(est, 0) ELSE 0 END) AS harmonized,
+                   {"coalesce(sum(fine), 0)" if self._has_fine else "0.0"} AS viirs_only
             FROM cell_day
             WHERE year BETWEEN {start.year} AND {end.year}
               AND date BETWEEN DATE '{start.isoformat()}' AND DATE '{end.isoformat()}'

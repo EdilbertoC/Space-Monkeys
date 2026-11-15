@@ -103,6 +103,8 @@ LAYERS_METHOD = (
 # factors); NOAA-21 is bridged through NOAA-20 as a regression, so it has no p.
 LAYER_SATELLITES = ("SNPP", "N20")
 REFERENCE_LAST_YEAR = 2021  # as pipeline.harmonize: MODIS orbits drift from 2022
+MIN_MONTH_EXPECTED = 20.0  # as pipeline.harmonize: smaller months are too noisy for a band
+MIN_BAND_MONTHS = 10
 
 SENSOR = {s["name"]: s["sensor"] for s in SATELLITES}
 FULL_NAME = {"SNPP": "S-NPP", "N20": "NOAA-20", "N21": "NOAA-21"}
@@ -207,15 +209,25 @@ def layers_check(
             "monthly_wape": round(err / obs, 4) if obs else None,
         }
 
+    def band(items: list[tuple]) -> list[float] | None:
+        """5th/95th percentiles of observed / expected - 1 over the monthly totals."""
+        r = sorted(o / x - 1 for _, _, _, o, x in items if x >= MIN_MONTH_EXPECTED)
+        if len(r) < MIN_BAND_MONTHS:
+            return None
+        q = lambda f: r[min(len(r) - 1, max(0, round(f * (len(r) - 1))))]  # noqa: E731
+        return [round(q(0.05), 4), round(q(0.95), 4)]
+
     by_biome: dict[str, list[tuple]] = {}
     for r in rows:
         by_biome.setdefault(r[0], []).append(r)
+    bands = {b: band(items) for b, items in sorted(by_biome.items())}
     return {
         "satellite": sat,
         "period": [str(start), str(end)],
         "target": f"cell-days with fire seen by MODIS or {FULL_NAME.get(sat, sat)}",
         "total": score(rows),
         "biomes": {b: score(items) for b, items in sorted(by_biome.items())},
+        "interval_90_monthly_by_biome": {b: v for b, v in bands.items() if v},
     }
 
 

@@ -140,6 +140,7 @@ def calendar(
     granularity: str,
     cov: Coverage,
     band: tuple[float, float],
+    detected_band: tuple[float, float] = (0.0, 0.0),
 ) -> list[dict]:
     harm = series_values(daily, "harmonized", cov)
     modis = series_values(daily, "modis", cov)["value"]
@@ -173,7 +174,13 @@ def calendar(
                 "modis": None if m is None else int(m),
                 "viirs": None if v is None else int(v),
                 "viirs_only": None if f is None else round(f, 2),
-                "detected": None if det is None else round(det, 2),
+                "detected": None
+                if det is None
+                else {
+                    "value": round(det, 2),
+                    "low": round(det * (1 + detected_band[0]), 2),
+                    "high": round(det * (1 + detected_band[1]), 2),
+                },
                 "provisional": b_end > cov.standard_until,
             }
         )
