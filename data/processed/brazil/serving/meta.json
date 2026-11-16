@@ -1,0 +1,422 @@
+{
+  "region": "brazil",
+  "unit": "fire_cell_days",
+  "grid_degrees": 0.1,
+  "time_basis": "UTC",
+  "coverage": {
+    "modis": {
+      "start": "2000-11-01",
+      "standard_until": "2026-08-31",
+      "end": "2026-11-14"
+    },
+    "viirs": {
+      "start": "2012-01-20",
+      "standard_until": "2026-07-31",
+      "end": "2026-11-14"
+    },
+    "satellites": [
+      {
+        "name": "Terra",
+        "sensor": "MODIS",
+        "start": "2000-11-01",
+        "end": null
+      },
+      {
+        "name": "Aqua",
+        "sensor": "MODIS",
+        "start": "2002-07-04",
+        "end": null
+      },
+      {
+        "name": "SNPP",
+        "sensor": "VIIRS",
+        "start": "2012-01-20",
+        "end": "2026-11-02"
+      },
+      {
+        "name": "N20",
+        "sensor": "VIIRS",
+        "start": "2018-04-01",
+        "end": null
+      },
+      {
+        "name": "N21",
+        "sensor": "VIIRS",
+        "start": "2023-03-01",
+        "end": null
+      }
+    ]
+  },
+  "biomes": [
+    {
+      "name": "Amazon",
+      "cells": 34460
+    },
+    {
+      "name": "Atlantic Forest",
+      "cells": 9699
+    },
+    {
+      "name": "Caatinga",
+      "cells": 7104
+    },
+    {
+      "name": "Cerrado",
+      "cells": 16660
+    },
+    {
+      "name": "Pampa",
+      "cells": 1825
+    },
+    {
+      "name": "Pantanal",
+      "cells": 1301
+    }
+  ],
+  "harmonization": {
+    "status": "available",
+    "method": "MODIS observed while MODIS delivers data; afterwards MODIS-equivalent expected fire cell-days estimated from VIIRS (LightGBM cross-fitted by year blocks on the years of stable MODIS orbits, calibrated per biome, coverage gap added back).",
+    "switch_date": null,
+    "viirs_satellites": [
+      {
+        "name": "SNPP",
+        "start": "2012-01-20",
+        "end": "2026-11-02"
+      },
+      {
+        "name": "N20",
+        "start": "2026-11-03",
+        "end": "2026-11-14"
+      }
+    ],
+    "estimate_until": "2026-11-14",
+    "model": "lightgbm-crossfit-isotonic-per-biome",
+    "version": "2026-11-15",
+    "test_metrics": {
+      "Brazil": {
+        "monthly_wape": 0.0366,
+        "bias": -0.0003
+      },
+      "Amazon": {
+        "monthly_wape": 0.054,
+        "bias": -0.0011
+      },
+      "Atlantic Forest": {
+        "monthly_wape": 0.0574,
+        "bias": 0.0022
+      },
+      "Caatinga": {
+        "monthly_wape": 0.0586,
+        "bias": 0.0016
+      },
+      "Cerrado": {
+        "monthly_wape": 0.0487,
+        "bias": -0.0006
+      },
+      "Pampa": {
+        "monthly_wape": 0.1415,
+        "bias": -0.0016
+      },
+      "Pantanal": {
+        "monthly_wape": 0.0984,
+        "bias": -0.001
+      }
+    },
+    "interval_90_monthly_by_biome": {
+      "Amazon": [
+        -0.1659,
+        0.3848
+      ],
+      "Atlantic Forest": [
+        -0.1359,
+        0.1473
+      ],
+      "Caatinga": [
+        -0.2067,
+        0.1572
+      ],
+      "Cerrado": [
+        -0.2087,
+        0.5156
+      ],
+      "Pampa": [
+        -0.2853,
+        0.4939
+      ],
+      "Pantanal": [
+        -0.1504,
+        0.4169
+      ]
+    },
+    "layers": {
+      "status": "available",
+      "method": "VIIRS split in two layers that add up, not rescaled: the common layer is the MODIS-equivalent estimate (fire both sensors can see, continuous since 2000); the VIIRS-only layer is 1 - P(MODIS also sees it) on each cell-day the estimating satellite saw fire (small fires only VIIRS detects, from 2012). Common + VIIRS-only is the expected number of cell-days with fire seen by MODIS or by that satellite.",
+      "satellites": [
+        "N20",
+        "SNPP"
+      ],
+      "start": "2012-01-20",
+      "end": "2026-11-14",
+      "check": {
+        "satellite": "SNPP",
+        "period": [
+          "2012-01-20",
+          "2021-12-31"
+        ],
+        "target": "cell-days with fire seen by MODIS or S-NPP",
+        "total": {
+          "observed_union": 4238355,
+          "expected": 4238185.56,
+          "bias": -0.0,
+          "monthly_wape": 0.0116
+        },
+        "biomes": {
+          "Amazon": {
+            "observed_union": 1836351,
+            "expected": 1835866.21,
+            "bias": -0.0003,
+            "monthly_wape": 0.0147
+          },
+          "Atlantic Forest": {
+            "observed_union": 548604,
+            "expected": 549112.16,
+            "bias": 0.0009,
+            "monthly_wape": 0.0175
+          },
+          "Caatinga": {
+            "observed_union": 400271,
+            "expected": 400318.41,
+            "bias": 0.0001,
+            "monthly_wape": 0.0111
+          },
+          "Cerrado": {
+            "observed_union": 1334228,
+            "expected": 1333932.19,
+            "bias": -0.0002,
+            "monthly_wape": 0.0185
+          },
+          "Pampa": {
+            "observed_union": 39734,
+            "expected": 39765.96,
+            "bias": 0.0008,
+            "monthly_wape": 0.0254
+          },
+          "Pantanal": {
+            "observed_union": 79167,
+            "expected": 79190.63,
+            "bias": 0.0003,
+            "monthly_wape": 0.0276
+          }
+        },
+        "interval_90_monthly_by_biome": {
+          "Amazon": [
+            -0.0631,
+            0.1301
+          ],
+          "Atlantic Forest": [
+            -0.0386,
+            0.0506
+          ],
+          "Caatinga": [
+            -0.0319,
+            0.0288
+          ],
+          "Cerrado": [
+            -0.1108,
+            0.2316
+          ],
+          "Pampa": [
+            -0.0531,
+            0.0849
+          ],
+          "Pantanal": [
+            -0.0485,
+            0.1472
+          ]
+        }
+      }
+    }
+  },
+  "known_gaps": [
+    {
+      "sensor": "MODIS",
+      "period": "2001-06/2001-07",
+      "note": "Missing data, end of June to beginning of July 2001 (FIRMS download Readme)."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2002",
+      "note": "Some data missing throughout the year (FIRMS download Readme)."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2007-08",
+      "note": "Some data missing from mid-August 2007 (FIRMS download Readme)."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2009-04-21/2009-04-22",
+      "note": "Missing for part of 21 April and all of 22 April 2009 (FIRMS download Readme)."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2002-07-30/2002-08-07",
+      "note": "No Aqua detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2002-09-13",
+      "note": "No Aqua detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2002-11-15",
+      "note": "No Aqua detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2022-04-01/2022-04-16",
+      "note": "No Aqua detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2003-12-17/2003-12-24",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2004-02-19",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2006-06-21",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2006-08-23",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2008-12-21/2008-12-23",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2014-10-26",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2016-02-19/2016-02-27",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2022-10-11/2022-10-22",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2024-05-12",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "MODIS",
+      "period": "2026-01-12",
+      "note": "No Terra detection in the whole region while other satellites saw fire (satellite not observing); MODIS counts are low on these days; they are left out of the model."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2023-07-19/2023-07-22",
+      "note": "No NOAA-20 detection in the whole region while other satellites saw fire (satellite not observing); S-NPP covers these days; where it was not observing either or had ended, the VIIRS estimate uses NOAA-21, bridged through NOAA-20 (none before March 2023)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2023-09-30",
+      "note": "No NOAA-20 detection in the whole region while other satellites saw fire (satellite not observing); S-NPP covers these days; where it was not observing either or had ended, the VIIRS estimate uses NOAA-21, bridged through NOAA-20 (none before March 2023)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-02-04",
+      "note": "No NOAA-20 detection in the whole region while other satellites saw fire (satellite not observing); S-NPP covers these days; where it was not observing either or had ended, the VIIRS estimate uses NOAA-21, bridged through NOAA-20 (none before March 2023)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-02-27/2024-02-28",
+      "note": "No NOAA-21 detection in the whole region while other satellites saw fire (satellite not observing); VIIRS counts are low on these days."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2012-03-25",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2022-07-27/2022-08-10",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2023-07-26/2023-07-27",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-05-30/2024-06-03",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-07-10/2024-07-15",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-07-25/2024-07-28",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-09-26",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2024-11-03/2024-11-05",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2026-03-10/2026-03-12",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2026-04-28/2026-04-30",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2026-06-01/2026-06-02",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2026-07-11/2026-07-16",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    },
+    {
+      "sensor": "VIIRS",
+      "period": "2026-08-03",
+      "note": "No S-NPP detection in the whole region while other satellites saw fire (satellite not observing); the VIIRS estimate uses NOAA-20 on these days (none before April 2018)."
+    }
+  ],
+  "limits": {
+    "max_area_cells": 50000,
+    "max_map_cells": 20000,
+    "max_day_buckets": 1000
+  }
+}
