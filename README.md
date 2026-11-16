@@ -613,6 +613,8 @@ All open source; versions in [pyproject.toml](pyproject.toml).
 | pyshp (reads the IBGE shapefile) | MIT |
 | openapi-spec-validator (contract tests) | Apache-2.0 |
 | jsonschema (contract tests) | MIT |
+| PyYAML (reads the OpenAPI contract) | MIT |
+| pytest-asyncio (async tests) | Apache-2.0 |
 | Matplotlib | Matplotlib License (PSF-based) |
 | Leaflet 1.9.4 (cube viewer, loaded from cdnjs) | BSD-2-Clause |
 | Python | PSF License |
